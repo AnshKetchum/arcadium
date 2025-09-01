@@ -18,3 +18,6 @@ class LanguageModel(nn.Module):
 
     def get_output_dimension(self):
         return self.vocab_size
+    
+    def metadata(self):
+        return self.transformer.metadata()

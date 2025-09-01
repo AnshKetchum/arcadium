@@ -7,12 +7,11 @@ INF = int(1e4)
 
 class DocumentLanguageModelDatasetFromFileRandomSampling(Dataset):
     
-    def __init__(self, filepath: str, tokenizer, sequence_length: int, model_vocab_size: int):
+    def __init__(self, filepath: str, tokenizer, sequence_length: int):
         super().__init__()
         self.filepath = filepath
         self.tokenizer = tokenizer
         self.sequence_length = sequence_length
-        self.model_vocab_size = model_vocab_size
 
         # Verify that the filepath exists
         assert os.path.exists(filepath)
@@ -31,17 +30,18 @@ class DocumentLanguageModelDatasetFromFileRandomSampling(Dataset):
         assert self.max_start > 0, "Text is too short for given sequence length"
 
     def __len__(self):
-        # Make dataset length proportional to possible windows
-        return INF
+        # Infinite-style dataset (random sampling)
+        return 2**31  # instead of INF, keep it practical
 
     def __getitem__(self, index: int):
         # Ignore index, just sample randomly
         start_idx = torch.randint(0, self.max_start, (1,)).item()
-        seq = self.tokens[start_idx : start_idx + self.sequence_length]
-        target_id = self.tokens[start_idx + self.sequence_length]
+        
+        # Grab sequence including next-token
+        seq = self.tokens[start_idx : start_idx + self.sequence_length + 1]  # length = seq_len + 1
 
-        # Build one-hot target
-        one_hot = torch.zeros(self.model_vocab_size, dtype=torch.long)
-        one_hot[target_id] = 1
+        input_seq = seq[:-1]    # [seq_len]
+        target_seq = seq[1:]    # [seq_len], next-token labels
 
-        return torch.tensor(seq, dtype=torch.long), one_hot
+        return torch.tensor(input_seq, dtype=torch.long), torch.tensor(target_seq, dtype=torch.long)
+

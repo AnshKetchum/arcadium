@@ -1,5 +1,5 @@
 parameters:
-  name: "MoE Model 1"
+  name: "moe-basic-1m"
   type: "moe"
   configuration:
     model:

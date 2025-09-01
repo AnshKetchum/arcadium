@@ -25,6 +25,7 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(embedding_dimension, embedding_dimension, bias=False)
 
         self.rope = RoPE(self.head_dim)
+        self.metadata_storage = {}
 
     def forward(self, x, attention_mask = None):
         B, T, E = x.shape
@@ -57,7 +58,15 @@ class Attention(nn.Module):
         # Merge heads
         out = attn_output.permute(0, 2, 1, 3).reshape(B, T, E)
         out = self.o_proj(out)
+
+        self.metadata_storage = {
+            "attention_probabilities" : attn_probs
+        }
+
         return out
+    
+    def metadata(self):
+        return self.metadata_storage
 
 class FFN(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dimension = 512):

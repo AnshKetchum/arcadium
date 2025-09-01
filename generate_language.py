@@ -17,7 +17,7 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
-    tokenized_input_data.append(tokenizer.get_beginning_of_sequence_token())
+    tokenized_input_data.insert(0, tokenizer.get_beginning_of_sequence_token())
 
     new_tokens = []
     with torch.no_grad():

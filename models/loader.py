@@ -37,7 +37,7 @@ def load_tokenizer(data_config: str):
     
     for fldr in conf.get("folders", []):
         for fl in os.listdir(fldr):
-            ingest_file(fl, tok)
+            ingest_file(os.path.join(fldr, fl), tok)
         
     return tok
 
@@ -60,7 +60,6 @@ def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: i
             fl, 
             tokenizer, 
             sequence_length,
-            model_vocab_size
         ))
 
     for fldr in conf.get("folders", []):
@@ -68,7 +67,6 @@ def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: i
             fldr, 
             tokenizer, 
             sequence_length,
-            model_vocab_size
         ))
 
     return AggregatedRoundRobinDataset(datasets)

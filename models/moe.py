@@ -73,3 +73,9 @@ class MoETransformer(nn.Module):
     o = self.final_norm(o)
     o = self.ffn(o)
     return o
+  
+  def metadata(self):
+    data =  []
+    for i, l in enumerate(self.decoder_layers):
+      data.append(l.attn.metadata())
+    return data
