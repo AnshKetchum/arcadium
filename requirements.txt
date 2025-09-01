@@ -1,0 +1,5 @@
+torchinfo
+torch
+huggingface-hub
+datasets
+tqdm

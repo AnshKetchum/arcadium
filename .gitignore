@@ -1,0 +1,21 @@
+# Virtual environments
+.venv
+
+# Data
+*.bin
+
+# Python artifacts
+__pycache__
+
+# Environment
+.env
+
+# Wandb
+wandb
+logs
+
+# ML Artifacts 
+checkpoints
+
+# Tokenizer artifacts
+*.pkl

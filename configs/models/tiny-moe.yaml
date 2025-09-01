@@ -1,0 +1,15 @@
+parameters:
+  name: "MoE Model 1"
+  type: "moe"
+  configuration:
+    model:
+      decoder_layers: 5 
+    decoder: 
+      input_dimension: 64 
+      output_dimension: 64
+      hidden_dimension: 64
+      heads: 8
+      experts: 8
+      norm_eps: 1e-5
+language_model:
+  vocab_size: 4096

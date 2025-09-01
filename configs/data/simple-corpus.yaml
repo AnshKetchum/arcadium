@@ -1,0 +1,3 @@
+parameters:
+  files: 
+    - data/starter/corpus.txt
