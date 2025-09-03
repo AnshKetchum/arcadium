@@ -1,0 +1,15 @@
+parameters:
+  name: "moe-basic-1m-256-emb"
+  type: "moe"
+  configuration:
+    model:
+      decoder_layers: 5 
+    decoder: 
+      input_dimension: 256
+      output_dimension: 256
+      hidden_dimension: 256
+      heads: 8
+      experts: 8
+      norm_eps: 1e-5
+language_model:
+  vocab_size: 4096

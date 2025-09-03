@@ -122,7 +122,8 @@ def pretrain(
     model_name: str = None
 ):
     # Checkpoint folder
-    ckpt = os.path.join("checkpoints", f"{experiment_name}-{time.strftime('%Y-%m-%d %H:%M:%S')}")
+    checkpoint_folder_name = f"{experiment_name}-{model_name}-{time.strftime('%Y-%m-%d-%H:%M:%S')}".strip().replace(" ", "-")
+    ckpt = os.path.join("checkpoints", checkpoint_folder_name)
     os.makedirs(ckpt, exist_ok=True)
 
     net = net.to(device)
@@ -277,7 +278,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pretrain a language model.")
 
     # Config files
-    parser.add_argument("--model_config", type=str, default="configs/models/tiny-moe.yaml",
+    parser.add_argument("--model_config", type=str, default="configs/models/tiny-moe-64-emb.yaml",
                         help="Path to model config YAML")
     parser.add_argument("--training_config", type=str, default="configs/training/basic.yaml",
                         help="Path to training config YAML")
@@ -351,6 +352,7 @@ def main():
 
     # Save tokenizer
     tokenizer.save()
+
 
     # Pretrain
     pretrain(

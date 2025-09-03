@@ -1,6 +1,9 @@
 import argparse
+import time
 import torch 
 import torch.nn as nn
+import json
+import os 
 from dotenv import load_dotenv 
 from models.loader import load_prexisting_tokenizer, load_language_model
 from models.tasks.language.tokenizer import BasicTokenizer
@@ -13,7 +16,7 @@ def sample_highest_prob(logits):
     next_token_id = optimal_index[:, -1].item()
     return next_token_id
 
-def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, device: torch.device, max_output_length: int = 100):
+def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, device: torch.device, max_output_length: int = 100, name: str = "", generation_folder: str = "", checkpoint_path: str = "", tokenizer_path: str = ""):
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
@@ -39,8 +42,23 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
             tokenized_input_data.append(next_token_id)
             new_tokens.append(tokenizer.decode_single(next_token_id))
 
-    print("Generated tokens", new_tokens)
-    return input_data + " ".join(new_tokens)
+    output = " ".join(BasicTokenizer.get_tokens(input_data) + new_tokens)
+    if os.path.exists(generation_folder) and os.path.isdir(generation_folder):
+        data = {
+            "output" : output, 
+            "max_output_length": max_output_length,
+            "model_name" : name,
+            "checkpoint_path" : checkpoint_path,
+            "tokenizer_path" : tokenizer_path,
+            "total_generated_tokens" : len(new_tokens),
+            "total_length_tokens" : len(BasicTokenizer.get_tokens(input_data)) + len(new_tokens)
+        }
+
+        save_path = os.path.join(generation_folder, f"generation-{time.strftime('%Y-%m-%d %H:%M:%S')}.json")
+        with open(save_path, "w") as f:
+            json.dump(data, f)
+
+    return output
 
 
 if __name__ == "__main__":
@@ -55,6 +73,9 @@ if __name__ == "__main__":
     parser.add_argument("--input_data", type=str, help="Input data to generate")
     parser.add_argument("--max_output_tokens", type=int, help="Maximum tokens to generate", default = 100)
     parser.add_argument("--device", type=str, help="Hardware device to generate on", default = "cuda")
+    parser.add_argument("--seed", type=int, help="Seed for reproducibility", default = 1)
+    parser.add_argument("--generation_folder", type=str, help="Default generation", default = "generations")
+
 
     args = parser.parse_args()
 
@@ -65,6 +86,15 @@ if __name__ == "__main__":
     checkpoint_path = args.checkpoint_path
     input_data = args.input_data
     hardware_device = args.device
+    seed = args.seed
+    generation_folder = args.generation_folder
+
+    os.makedirs(generation_folder, exist_ok=True)
+
+    # Plant our seed for reproducibility
+    torch.manual_seed(seed)
+    
+    print("Using a seed of ", seed)
 
     # Hardware
     device = torch.device(hardware_device if torch.cuda.is_available() else "cpu")
@@ -81,7 +111,12 @@ if __name__ == "__main__":
         tokenizer, 
         net, 
         device, 
-        args.max_output_tokens
+        args.max_output_tokens,
+        name,
+        generation_folder,
+        checkpoint_path,
+        tokenizer_path
+
     )
 
     print("Output text", result)

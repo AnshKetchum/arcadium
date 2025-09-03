@@ -1,0 +1,1 @@
+# This folder contains some experiments with kernels that are used to speed up operations

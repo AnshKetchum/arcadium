@@ -1,11 +1,11 @@
 parameters:
-  name: "moe-basic-1m"
+  name: "moe-basic-1m-64-emb"
   type: "moe"
   configuration:
     model:
       decoder_layers: 5 
     decoder: 
-      input_dimension: 64 
+      input_dimension: 64
       output_dimension: 64
       hidden_dimension: 64
       heads: 8

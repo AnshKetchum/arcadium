@@ -16,6 +16,7 @@ logs
 
 # ML Artifacts 
 checkpoints
+generations
 
 # Tokenizer artifacts
 *.pkl
