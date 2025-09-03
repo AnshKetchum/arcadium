@@ -18,5 +18,9 @@ logs
 checkpoints
 generations
 
+# Kernel artifacts
+*.so
+build
+
 # Tokenizer artifacts
 *.pkl

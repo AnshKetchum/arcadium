@@ -1,0 +1,1 @@
+# Exercise to see the value of parallel reductions
