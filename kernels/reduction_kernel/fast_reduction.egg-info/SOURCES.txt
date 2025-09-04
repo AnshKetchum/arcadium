@@ -1,0 +1,11 @@
+README.md
+setup.py
+/home/ac/CodingWorkspace/zyphra/sample-moe-mode/kernels/reduction_kernel/csrc/bindings.cpp
+/home/ac/CodingWorkspace/zyphra/sample-moe-mode/kernels/reduction_kernel/csrc/multi_block_thread_based_reduction_kernel copy.cu
+/home/ac/CodingWorkspace/zyphra/sample-moe-mode/kernels/reduction_kernel/csrc/naive_reduction_kernel.cu
+/home/ac/CodingWorkspace/zyphra/sample-moe-mode/kernels/reduction_kernel/csrc/single_block_thread_based_reduction_kernel.cu
+fast_reduction.egg-info/PKG-INFO
+fast_reduction.egg-info/SOURCES.txt
+fast_reduction.egg-info/dependency_links.txt
+fast_reduction.egg-info/top_level.txt
+tests/test_precision.py

@@ -9,5 +9,11 @@ namespace reduction_kernels {
         const torch::Tensor tensor_to_reduce
     );
 
+    torch::Tensor single_block_thread_based_reduction(
+        const torch::Tensor tensor_to_reduce
+    );
 
+    torch::Tensor multi_block_thread_based_reduction(
+        const torch::Tensor tensor_to_reduce
+    );
 }
