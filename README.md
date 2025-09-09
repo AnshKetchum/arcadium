@@ -71,3 +71,25 @@ Current Interesting Findings:
 ```
 
 So, we've went from incoherant 'the's --> somewhat coherent partial sentences --> coherent but repetitive sentences.
+
+*9/8/2025*
+
+- Continuing off last session in 9/3, the big question is whether I need to focus my efforts on gathering more data, or increasing the parameter size. Initially, I had an idea, why don't we port the relatively standard "roofline" approach for workload analysis to hardware? Just like a workload is either compute or memory bound, a pretraining setup could be considered to be data or parameter bound, where perf is loss / total iters and our "arithmetic intensity" is tokens / param. Sounds cool, right? Turns out, if you train models (I varied the number of decoder layers in my transformer), this "roofline" curve just ends up being a regular loss curve (or an overlapping set of loss curves), as parameters stays constant per run. 
+    - The consolation is that if we apply the roofline-like model to the loss curve, we can now think of the initial drop area as the model being "data-bound" (assuming x is tokens / param). Initially, tokens / param is really low, so we are in effect data bound. But as the loss plateaus towards convergence, we can claim we're ~parameter bound~ instead.
+
+
+*9/9/2025*
+
+- Continuing, what can we do to figure out whether we're data bound or model bound? Here's another idea - plot loss vs parameters, and loss vs. tokens. Effectively, we're assuming L = L(theta, D) i.e loss is a function of only data and parameters for this high level model. Plotting these two graphs, and then performing regressions can possibly give us additional insight into how the loss changes as a function or params and data. Literally, what I mean to say is to take the slope of loss vs params (loss / param) and loss vs data (loss / data), see which is more negative, and try to scale out in that direction. This image shows a small scale experiment for loss vs params. 
+
+
+![story/loss_versus_parameters.png](story/loss_versus_parameters.png)
+
+Sanity checks:
+1. All models should have a similar loss at 0 iterations
+2. Loss goes down with epochs. Training seems to be going great
+
+Interesting points:
+1. The graph looks somewhat linear??? 
+
+Next steps: Scale out the hyper parameter search. For this, I've made this script [ablations/grid_search_decoder_layers.py](ablations/grid_search_decoder_layers.py). 

@@ -2,8 +2,8 @@ import torch
 import os 
 from torch.utils.data import Dataset
 from models.tasks.language.tokenizer import BaseTokenizer
+from .config import INF
 
-INF = int(1e4)
 
 class DocumentLanguageModelDatasetFromFileRandomSampling(Dataset):
     

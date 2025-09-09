@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import Dataset
-
-INF = int(1e4)
+from .config import INF
 
 class AggregatedRoundRobinDataset(Dataset):
     """

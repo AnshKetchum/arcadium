@@ -24,3 +24,6 @@ build
 
 # Tokenizer artifacts
 *.pkl
+
+# Ablation artifacts
+generated_configs

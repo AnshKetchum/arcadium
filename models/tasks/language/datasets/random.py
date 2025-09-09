@@ -1,6 +1,7 @@
 import torch 
 from torch.utils.data import Dataset
 from models.tasks.language.tokenizer import BaseTokenizer
+from .config import INF
 import os 
 
 NUM_TOKENS = 128
