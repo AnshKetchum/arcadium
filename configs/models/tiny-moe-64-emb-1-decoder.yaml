@@ -1,13 +1,13 @@
 parameters:
-  name: "moe-basic-1m-256-emb"
+  name: "moe-basic-1m-64-emb"
   type: "moe"
   configuration:
     model:
-      decoder_layers: 5 
+      decoder_layers: 1 
     decoder: 
-      input_dimension: 256
-      output_dimension: 256
-      hidden_dimension: 256
+      input_dimension: 64
+      output_dimension: 64
+      hidden_dimension: 64
       heads: 8
       experts: 8
       norm_eps: 1e-5

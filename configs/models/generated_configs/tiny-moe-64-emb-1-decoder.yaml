@@ -1,15 +1,15 @@
 parameters:
-  name: "moe-basic-1m-64-emb"
-  type: "moe"
+  name: moe-basic-1m-64-emb-1L
+  type: moe
   configuration:
     model:
-      decoder_layers: 5 
-    decoder: 
+      decoder_layers: 1
+    decoder:
       input_dimension: 64
       output_dimension: 64
       hidden_dimension: 64
       heads: 8
       experts: 8
-      norm_eps: 1e-5
+      norm_eps: 1.0e-05
 language_model:
   vocab_size: 4096

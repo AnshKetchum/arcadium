@@ -1,0 +1,1 @@
+python pretrain_language.py --model_config configs/models/tiny-moe-64-emb-1-decoder.yaml

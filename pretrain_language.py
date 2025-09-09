@@ -253,6 +253,27 @@ def pretrain(
                 json.dump(activation_stats, f)
             print(f"[iter {i}] Saved activation VRAM JSON to {json_path}")
 
+            param_count = sum(p.numel() for p in net.parameters())
+
+            # Get batch size and seq length from the actual tensor
+            batch_size, seq_len = batch.shape[0], batch.shape[1]
+            # Rough FLOPs estimate: ~2 * params * seq_len * batch_size
+            est_flops = 2 * param_count * seq_len * batch_size
+
+            metrics = {
+                "iter": i,
+                "loss": loss.item(),
+                "trained_tokens": cumulative_tokens,
+                "param_count": param_count,
+                "estimated_flops": est_flops,
+            }
+
+            metrics_path = os.path.join(ckpt, f"{model_name}-metrics-iter{i}.json")
+            with open(metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2)
+            print(f"[iter {i}] Saved training metrics JSON to {metrics_path}")
+
+
             plot_visualizations(
                 net, 
                 ckpt,
