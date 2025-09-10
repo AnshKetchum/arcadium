@@ -19,7 +19,7 @@ def plot_loss_vs_params(checkpoints_dir, save_path=None):
     for idx, folder in enumerate(subfolders):
         subdir = os.path.join(checkpoints_dir, folder)
 
-        pattern = os.path.join(subdir, "moe-basic-1m-64-emb-metrics-iter*.json")
+        pattern = os.path.join(subdir, "moe-basic-1m-64-emb-1*-metrics-iter*.json")
         files = sorted(glob.glob(pattern))
 
         for fpath in files:

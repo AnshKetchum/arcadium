@@ -331,6 +331,9 @@ def main():
     # Load model
     name, model_type, net = load_language_model(model_config, device)
 
+    # Verify that the tokenizer is valid for the model (i.e that the model's vocab size is at least the value you see there)
+    assert net.vocab_size >= tokenizer.size(), f"Model vocab size of {net.vocab_size} is too low for tokenizer size of {tokenizer.size()}"
+
 
     # Model summary
     x = torch.zeros((1, conf["sequence_length"]), dtype=torch.long).to(device)

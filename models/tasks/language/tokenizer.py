@@ -76,6 +76,10 @@ class BasicTokenizer(BaseTokenizer):
         
     def get_end_of_sequence_token(self) -> int:
         return self.encode(self.EOS_TOKEN)[0]
+    
+    def size(self):
+        assert len(self.mapping) == len(self.reverse_mapping),  f"Mapping has a size of {len(self.mapping)} while reverse mapping has a size of {len(self.reverse_mapping)}"
+        return len(self.mapping)
 
     def save(self, path: str = None):
 
@@ -97,7 +101,6 @@ class BasicTokenizer(BaseTokenizer):
 
     def load(self, path: str = None):
 
-        load_location = ""
         if path:
             assert os.path.exists(path)
             assert os.path.isfile(path)

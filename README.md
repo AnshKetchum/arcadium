@@ -93,3 +93,70 @@ Interesting points:
 1. The graph looks somewhat linear??? 
 
 Next steps: Scale out the hyper parameter search. For this, I've made this script [ablations/grid_search_decoder_layers.py](ablations/grid_search_decoder_layers.py). 
+
+*9/10/2025*
+
+- Continuing work on understanding the impacts of data. Adding 2 documents of data does seem to reduce the loss for larger models. In the case of 1M parameter models, we actually see a slight increase in cross-entropy loss. That probably can be explained through some inductive bias agreement.
+
+Here's training metrics for an 8-layer decoder model without the 2 documents (trained via the `examples/smoe-8layer-small-data.sh` config).
+
+```json
+{
+  "iter": 999,
+  "loss": 1.2089617252349854,
+  "trained_tokens": 256000,
+  "param_count": 1987712,
+  "estimated_flops": 1017708544
+}
+```
+
+and with - 
+
+```json
+{
+  "iter": 999,
+  "loss": 0.6912261247634888,
+  "trained_tokens": 256000,
+  "param_count": 1987712,
+  "estimated_flops": 1017708544
+}
+```
+
+Quite a difference in terms for the CE function. Initial training metrics
+
+
+```json
+{
+  "iter": 100,
+  "loss": 6.736004829406738,
+  "trained_tokens": 25856,
+  "param_count": 1987712,
+  "estimated_flops": 1017708544
+}
+```
+
+and with - 
+
+```json
+{
+  "iter": 100,
+  "loss": 6.350053787231445,
+  "trained_tokens": 25856,
+  "param_count": 1987712,
+  "estimated_flops": 1017708544
+}
+```
+
+So, with additional data, we should expect lower loss at earlier stages. I assumed that initially the loss would be higher (and eventually converge to a lower loss). That doesn't seem to be the case.
+
+The model outputs are, however, equally bad.
+
+```python
+Shakespeare produced most of John Ward, the Blackfriars indoor theatre. Extant records of Shakespeare's plays were on 23 April 1616, at the King's Men "placed men went into the King's Men "placed men went into the King's Men "placed men went into the King's Men "placed men went into the King's Men.[39] All the King's Men.[39] All the King's Men.[39] All the King's Men.[39] All the first two additional team for the first time in his time plays were on the first two additional team for the first two additional team for the first two additional team for the first two additional team
+```
+
+(no-data-model)
+
+```python
+Shakespeare produced most echo alternative. in the But bite and his jackfruit continue to be shreds and apart turned was pulled and raised in pork, braised At the lion’s of 18, he mane chew Kimberlie The India’s is also indicated that he mane chew Kimberlie The India’s is also went on the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of figured grow His uneven bars, and 2x His vegan were
+```
