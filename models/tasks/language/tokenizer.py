@@ -53,6 +53,7 @@ class BasicTokenizer(BaseTokenizer):
     
     @classmethod
     def get_tokens(cls, corpus: str):
+        print(corpus)
         return corpus.split()
     
     def ingest(self, additional_corpus: list[str]):
