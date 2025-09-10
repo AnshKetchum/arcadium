@@ -303,12 +303,15 @@ def main():
                         help="Path to model config YAML")
     parser.add_argument("--training_config", type=str, default="configs/training/basic.yaml",
                         help="Path to training config YAML")
+    parser.add_argument("--tokenizer_path", type=str, default="tokenizer.pkl",
+                        help="Path to training config YAML")
 
     args = parser.parse_args()
 
     # --- Load configs ---
     model_config = args.model_config
     training_config = args.training_config
+    tokenizer_path = args.tokenizer_path
 
     # Training configuration
     conf = load_config(training_config, "parameters")
@@ -323,7 +326,7 @@ def main():
     assert os.path.exists(training_config), f"Training config not found: {training_config}"
 
     # Load tokenizer
-    tokenizer = load_tokenizer(training_data_config)
+    tokenizer = load_tokenizer(tokenizer_path)
 
     # Hardware
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -373,10 +376,6 @@ def main():
         },
     )
     wandb.watch(net, log="all", log_freq=100)
-
-    # Save tokenizer
-    tokenizer.save()
-
 
     # Pretrain
     pretrain(

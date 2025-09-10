@@ -7,7 +7,7 @@ from typing import Tuple
 # mixture of experts
 from models.moe import MoETransformerParams, MoETransformer
 from models.moe import MoETransformer
-from models.tasks.language.model import LanguageModel
+from models.tasks.language.architecture import LanguageModel
 from models.tasks.language.tokenizer import BasicTokenizer
 
 # Datasets
@@ -26,19 +26,10 @@ def ingest_file(fl: str, tok: BasicTokenizer):
 
     tok.ingest(tokens)
 
-def load_tokenizer(data_config: str):
-
-    conf = load_config(data_config, "parameters")
+def load_tokenizer(tokenizer_path: str):
 
     tok = BasicTokenizer()
-
-    for fl in conf.get("files", []):
-        ingest_file(fl, tok)
-    
-    for fldr in conf.get("folders", []):
-        for fl in os.listdir(fldr):
-            ingest_file(os.path.join(fldr, fl), tok)
-        
+    tok.load(tokenizer_path)
     return tok
 
 def load_prexisting_tokenizer(tokenizer_path: str):

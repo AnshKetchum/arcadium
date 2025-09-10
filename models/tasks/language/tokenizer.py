@@ -86,7 +86,6 @@ class BasicTokenizer(BaseTokenizer):
         save_location = ""
         if path:
             assert os.path.exists(path)
-            assert os.path.isdir(path)
             save_location = path
     
         data = {
@@ -94,7 +93,7 @@ class BasicTokenizer(BaseTokenizer):
             "reverse_mapping" : self.reverse_mapping
         }
 
-        with open(os.path.join(save_location, "tokenizer.pkl"), "wb") as f:
+        with open(os.path.join(save_location), "wb") as f:
             pickle.dump(data, f)
          
         print("Successfully saved", len(self.mapping), "tokens.")

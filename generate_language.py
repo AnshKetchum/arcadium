@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv 
 from models.loader import load_prexisting_tokenizer, load_language_model
 from models.tasks.language.tokenizer import BasicTokenizer
-from models.tasks.language.model import LanguageModel
+from models.tasks.language.architecture import LanguageModel
 
 load_dotenv()
 

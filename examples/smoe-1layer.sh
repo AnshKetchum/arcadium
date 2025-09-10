@@ -13,4 +13,4 @@ DATA_ARGS=(
 # Run training with both sets of args
 python pretrain_language.py \
   "${MODEL_ARGS[@]}" \
-  "${DATA_ARGS[@]}" | tee out.log
+  "${DATA_ARGS[@]}" | tee logs/out.log
