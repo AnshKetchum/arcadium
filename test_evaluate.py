@@ -12,7 +12,7 @@ hf_config = MyLMConfig(
 model = MyLMHF(hf_config, device="cuda")
 
 # 2. Load checkpoint
-ckpt = torch.load("checkpoints/moe-language-modeling-tiny-moe-basic-1m-64-emb-1L-2025-09-10-12:50:49/moe-basic-1m-64-emb-1L-iter999.pt", map_location="cuda")
+ckpt = torch.load("checkpoints/moe-language-modeling-tiny-run-2025-09-10-21-40-32/weights/moe-basic-1m-64-emb-1L-iter999.pt", map_location="cuda")
 model.lm.load_state_dict(ckpt["model_state_dict"])
 
 # 3. Wrap with lm-eval interface
