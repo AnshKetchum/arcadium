@@ -1,0 +1,3 @@
+parameters:
+  folders: 
+    - data/starter-medium/raw

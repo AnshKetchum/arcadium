@@ -1,7 +1,7 @@
 import torch 
 import os 
 from torch.utils.data import Dataset
-from models.tasks.language.tokenizer import BaseTokenizer
+from models.tasks.language.language_tokenizer import BaseTokenizer
 from .config import INF
 
 

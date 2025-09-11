@@ -27,3 +27,6 @@ build
 
 # Ablation artifacts
 generated_configs
+
+# Data 
+data

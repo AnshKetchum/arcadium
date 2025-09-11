@@ -27,8 +27,8 @@ class MyLMEval(LM):
     def batch_size(self):
         return 1
 
-    def tok_encode(self, string: str):
-        return self.tokenizer.encode(string)
+    def tok_encode(self, string):
+        return self.tokenizer.encode(string.doc["page"])
 
     def tok_decode(self, tokens):
         return self.tokenizer.decode(tokens)

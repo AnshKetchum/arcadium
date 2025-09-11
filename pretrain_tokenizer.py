@@ -2,19 +2,19 @@ import argparse
 import os 
 
 from models.loader import ingest_file
-from models.tasks.language.tokenizer import BasicTokenizer
+from models.tasks.language.language_tokenizer import BasicTokenizer
 from utils import load_config
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_config", type=str, required=True, help="Path to data to set tokenizer onto")
+    parser.add_argument("--raw_data_config", type=str, required=True, help="Path to raw data to set tokenizer onto")
     parser.add_argument("--save_path", type=str, required=False, default="tokenizer.pkl", help="Path to data to set tokenizer onto")
 
     args = parser.parse_args()
 
     # Load configs
-    data_config_path = args.data_config
+    data_config_path = args.raw_data_config
     save_path = args.save_path
 
     assert os.path.exists(data_config_path), f"{data_config_path} doesn't exist"

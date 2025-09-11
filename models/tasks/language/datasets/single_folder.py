@@ -1,61 +1,59 @@
 import torch
 import os
+import pickle
 from torch.utils.data import Dataset
-from models.tasks.language.tokenizer import BaseTokenizer
-from .config import INF
 
 
-class DocumentLanguageModelDatasetFromFolderRandomSampling(Dataset):
+class DocumentLanguageModelDatasetFromShardsRandomSampling(Dataset):
     """
-    Dataset for a folder of text files. Samples sequences randomly in a round-robin manner across files.
+    Dataset that loads pre-tokenized shards (pickled) and samples sequences randomly
+    in a round-robin manner across shards.
     """
-    def __init__(self, folderpath: str, tokenizer: BaseTokenizer, sequence_length: int):
+    def __init__(self, shard_folder: str, sequence_length: int):
         super().__init__()
-        self.folderpath = folderpath
-        self.tokenizer = tokenizer
+        self.shard_folder = shard_folder
         self.sequence_length = sequence_length
 
         # Verify folder exists
-        assert os.path.isdir(folderpath), f"{folderpath} is not a valid directory"
+        assert os.path.isdir(shard_folder), f"{shard_folder} is not a valid directory"
         
-        # List all files in folder
-        self.files = [
-            os.path.join(folderpath, f) 
-            for f in os.listdir(folderpath) 
-            if os.path.isfile(os.path.join(folderpath, f))
+        # List all shard files
+        self.shards = [
+            os.path.join(shard_folder, f) 
+            for f in os.listdir(shard_folder) 
+            if os.path.isfile(os.path.join(shard_folder, f)) and f.endswith(".pkl")
         ]
-        assert len(self.files) > 0, "No files found in folder"
+        assert len(self.shards) > 0, "No shard files found in folder"
 
-        # Load and tokenize each file
+        # Load all shards into memory
         self.token_lists = []
-        for filepath in self.files:
-            with open(filepath, "r") as f:
-                tokens = (
-                    [tokenizer.get_beginning_of_sequence_token()] +
-                    tokenizer.encode(f.read()) +
-                    [tokenizer.get_end_of_sequence_token()]
-                )
-                if len(tokens) > sequence_length:  # Only keep files long enough
+        for shard_path in self.shards:
+            with open(shard_path, "rb") as f:
+                shard_data = pickle.load(f)
+            for doc in shard_data["documents"]:
+                tokens = doc["tokens"]
+                if len(tokens) > sequence_length:
                     self.token_lists.append(tokens)
 
-        assert len(self.token_lists) > 0, "No file is long enough for the given sequence length"
+        assert len(self.token_lists) > 0, "No document is long enough for the given sequence length"
 
-        # Keep track of max start index per file
+        # Keep track of max start index per document
         self.max_starts = [len(t) - sequence_length - 1 for t in self.token_lists]
 
         # Round-robin pointer
-        self.file_idx = 0
+        self.doc_idx = 0
 
-        print(f"Loaded {len(self.token_lists)} files for random sampling with sequence length {sequence_length}")
+        print(f"Loaded {len(self.token_lists)} documents from {len(self.shards)} shards "
+              f"for random sampling with sequence length {sequence_length}")
 
     def __len__(self):
         # Effectively infinite dataset
         return 2**31  
 
     def __getitem__(self, index: int):
-        # Round-robin file selection
-        tokens = self.token_lists[self.file_idx]
-        max_start = self.max_starts[self.file_idx]
+        # Round-robin document selection
+        tokens = self.token_lists[self.doc_idx]
+        max_start = self.max_starts[self.doc_idx]
 
         start_idx = torch.randint(0, max_start, (1,)).item()
         seq = tokens[start_idx : start_idx + self.sequence_length + 1]  # include next token
@@ -64,8 +62,7 @@ class DocumentLanguageModelDatasetFromFolderRandomSampling(Dataset):
         input_seq = seq[:-1]        # [seq_len]
         target_seq = seq[1:]        # [seq_len], next-token labels
 
-        # Update file index for next sample (round-robin)
-        self.file_idx = (self.file_idx + 1) % len(self.token_lists)
+        # Update doc index for next sample (round-robin)
+        self.doc_idx = (self.doc_idx + 1) % len(self.token_lists)
 
         return torch.tensor(input_seq, dtype=torch.long), torch.tensor(target_seq, dtype=torch.long)
-

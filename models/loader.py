@@ -8,11 +8,11 @@ from typing import Tuple
 from models.moe import MoETransformerParams, MoETransformer
 from models.moe import MoETransformer
 from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.tokenizer import BasicTokenizer
+from models.tasks.language.language_tokenizer import BasicTokenizer
 
 # Datasets
 from models.tasks.language.datasets.single_file import DocumentLanguageModelDatasetFromFileRandomSampling
-from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromFolderRandomSampling
+from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
 from models.tasks.language.datasets.multi_dataset import AggregatedRoundRobinDataset
 
 from utils import load_config
@@ -46,17 +46,9 @@ def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: i
 
     datasets = []
 
-    for fl in conf.get("files",  []):
-        datasets.append(DocumentLanguageModelDatasetFromFileRandomSampling(
-            fl, 
-            tokenizer, 
-            sequence_length,
-        ))
-
     for fldr in conf.get("folders", []):
-        datasets.append(DocumentLanguageModelDatasetFromFolderRandomSampling(
+        datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
             fldr, 
-            tokenizer, 
             sequence_length,
         ))
 

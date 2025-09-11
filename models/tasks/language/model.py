@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
 from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.tokenizer import BasicTokenizer
+from models.tasks.language.language_tokenizer import BasicTokenizer
 from models.loader import load_language_model  # your existing loader
 
 
