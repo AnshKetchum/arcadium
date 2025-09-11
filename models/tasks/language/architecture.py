@@ -11,6 +11,11 @@ class LanguageModel(nn.Module):
 
     def forward(self, x):
         # x: [batch, seq_len] integer tokens
+
+        # Sanity checks to verify that the input going into the model is what we expect
+        assert x.max().item() < self.vocab_size, f"Token ID {x.max().item()} exceeds vocab size {self.vocab_size}"
+        assert x.min().item() >= 0, f"Token ID {x.min().item()} is negative"
+
         x = self.embed(x)  # [batch, seq_len, hidden_dim]
         h = self.transformer(x)  # [batch, seq_len, hidden_dim_out]
         logits = self.lm_head(h)  # [batch, seq_len, vocab_size]

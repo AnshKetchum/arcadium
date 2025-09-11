@@ -1,15 +1,24 @@
-# my_eval.py
 from lm_eval.api.model import LM
 import torch
 import torch.nn.functional as F
+import math
+
 
 class MyLMEval(LM):
-    def __init__(self, model, max_length=2048, device="cuda"):
+    def __init__(self, model, max_length=2048, device="cuda", chunk_size=512):
+        """
+        Args:
+            model: Wrapped PyTorch language model with .tokenizer
+            max_length: maximum sequence length for generation
+            device: 'cuda' or 'cpu'
+            chunk_size: max length per chunk for loglikelihood evaluation
+        """
         super().__init__()
         self.model = model
-        self.tokenizer = model.tokenizer  # from wrapped model
+        self.tokenizer = model.tokenizer
         self._max_length = max_length
         self.device = device
+        self.chunk_size = chunk_size
 
     @property
     def eot_token_id(self):
@@ -21,7 +30,7 @@ class MyLMEval(LM):
 
     @property
     def max_gen_toks(self):
-        return 256
+        return 64
 
     @property
     def batch_size(self):
@@ -33,31 +42,37 @@ class MyLMEval(LM):
     def tok_decode(self, tokens):
         return self.tokenizer.decode(tokens)
 
+    def _compute_loglikelihood(self, input_ids, target_ids):
+        """Compute loglikelihood for a chunk of tokens"""
+        with torch.no_grad():
+            logits = self.model.lm(input_ids)
+            log_probs = F.log_softmax(logits, dim=-1)
+            selected = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
+            return selected.sum().item()
+
     def loglikelihood(self, requests):
         res = []
         for context, continuation in requests:
             ctx_ids = self.tok_encode(context)
             cont_ids = self.tok_encode(continuation)
 
-            input_ids = torch.tensor([ctx_ids + cont_ids[:-1]], device=self.device)
-            target_ids = torch.tensor([cont_ids], device=self.device)
+            # Split into manageable chunk to avoid OOM
+            total_ids = ctx_ids + cont_ids
+            total_len = len(cont_ids)
+            loglikelihood = 0.0
 
-            with torch.no_grad():
-                logits = self.model.lm(input_ids)
-                logits = logits[:, -len(cont_ids):, :]
-                log_probs = F.log_softmax(logits, dim=-1)
-
-                selected = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
-                loglikelihood = selected.sum().item()
+            start_idx = 0
+            while start_idx < total_len:
+                end_idx = min(start_idx + self.chunk_size, total_len)
+                input_ids = torch.tensor([total_ids[:end_idx]], device=self.device)
+                target_ids = torch.tensor([total_ids[start_idx:end_idx]], device=self.device)
+                loglikelihood += self._compute_loglikelihood(input_ids, target_ids)
+                start_idx = end_idx
 
             res.append((loglikelihood, True))
         return res
 
     def loglikelihood_rolling(self, requests):
-        """
-        Approximate implementation: compute loglikelihood over the entire string,
-        without splitting context/continuation.
-        """
         res = []
         for string in requests:
             ids = self.tok_encode(string)
@@ -65,15 +80,15 @@ class MyLMEval(LM):
                 res.append((0.0, True))
                 continue
 
-            input_ids = torch.tensor([ids[:-1]], device=self.device)
-            target_ids = torch.tensor([ids[1:]], device=self.device)
-
-            with torch.no_grad():
-                logits = self.model.lm(input_ids)
-                log_probs = F.log_softmax(logits, dim=-1)
-
-                selected = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
-                loglikelihood = selected.sum().item()
+            # Process in chunks
+            loglikelihood = 0.0
+            start_idx = 0
+            while start_idx < len(ids) - 1:
+                end_idx = min(start_idx + self.chunk_size, len(ids) - 1)
+                input_ids = torch.tensor([ids[start_idx:end_idx]], device=self.device)
+                target_ids = torch.tensor([ids[start_idx + 1:end_idx + 1]], device=self.device)
+                loglikelihood += self._compute_loglikelihood(input_ids, target_ids)
+                start_idx = end_idx
 
             res.append((loglikelihood, True))
         return res
