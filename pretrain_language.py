@@ -1,6 +1,7 @@
 import argparse
 from collections import defaultdict
 import json
+import shutil
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -116,20 +117,24 @@ def pretrain(
     optim: torch.optim.Optimizer,
     device: torch.device,
     num_iters=10,
-    num_val_iters = 10,
+    num_val_iters=10,
     checkpoint_frequency: int = 5,
     experiment_name=None,
-    model_name: str = None
+    model_name: str = None,
+    ckpt: str = None,
 ):
-    # Checkpoint folder
-    checkpoint_folder_name = f"{experiment_name}-{model_name}-{time.strftime('%Y-%m-%d-%H:%M:%S')}".strip().replace(" ", "-")
-    ckpt = os.path.join("checkpoints", checkpoint_folder_name)
-    os.makedirs(ckpt, exist_ok=True)
-
     net = net.to(device)
     net.train()
     data_iterator = iter(train_dataloader)
-    
+
+    # --- Subfolders ---
+    weights_dir = os.path.join(ckpt, "weights")
+    metrics_dir = os.path.join(ckpt, "metrics")
+    memory_layout_dir = os.path.join(ckpt, "memory_layout")
+    os.makedirs(weights_dir, exist_ok=True)
+    os.makedirs(metrics_dir, exist_ok=True)
+    os.makedirs(memory_layout_dir, exist_ok=True)
+
     # --- Activation hook setup ---
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
@@ -145,8 +150,8 @@ def pretrain(
             print(f"Stopped at {i + 1} training iterations.")
             break
 
-        batch_mem = batch.numel() * batch.element_size() / (1024 ** 2)
-        labels_mem = labels.numel() * labels.element_size() / (1024 ** 2)
+        batch_mem = batch.numel() * batch.element_size() / (1024**2)
+        labels_mem = labels.numel() * labels.element_size() / (1024**2)
         batch, labels = batch.to(device), labels.to(device)
 
         # --- Forward pass ---
@@ -154,24 +159,24 @@ def pretrain(
             torch.cuda.reset_peak_memory_stats(device)
         logits, loss = training_step(net, batch=batch, labels=labels)
         if torch.cuda.is_available():
-            forward_allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
-            forward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            forward_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
+            forward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
 
         # --- Backward pass ---
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
         loss.backward()
         if torch.cuda.is_available():
-            backward_allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
-            backward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            backward_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
+            backward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
 
         # --- Optimizer step ---
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
         optim.step()
         if torch.cuda.is_available():
-            optimizer_allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
-            optimizer_peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            optimizer_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
+            optimizer_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
 
         elapsed = time.time() - start_time
         iters_per_sec = 1 / elapsed if elapsed > 0 else 0.0
@@ -181,19 +186,22 @@ def pretrain(
 
         # ---- VRAM breakdown ----
         if torch.cuda.is_available():
-            param_mem = sum(p.numel() * p.element_size() for p in net.parameters()) / (1024 ** 2)
+            param_mem = sum(p.numel() * p.element_size() for p in net.parameters()) / (1024**2)
             opt_mem = sum(
                 v.numel() * v.element_size()
                 for state in optim.state.values()
                 for v in state.values()
                 if torch.is_tensor(v)
-            ) / (1024 ** 2)
-            allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
-            peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            ) / (1024**2)
+            allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
+            peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
 
-            # remaining VRAM not accounted for
-            rem_vram_alloc = allocated_mem - (param_mem + opt_mem + batch_mem + labels_mem + total_activation_mem)
-            rem_vram_peak = peak_mem - (param_mem + opt_mem + batch_mem + labels_mem + total_activation_mem)
+            rem_vram_alloc = allocated_mem - (
+                param_mem + opt_mem + batch_mem + labels_mem + total_activation_mem
+            )
+            rem_vram_peak = peak_mem - (
+                param_mem + opt_mem + batch_mem + labels_mem + total_activation_mem
+            )
             rem_vram_alloc = max(rem_vram_alloc, 0.0)
             rem_vram_peak = max(rem_vram_peak, 0.0)
         else:
@@ -202,30 +210,33 @@ def pretrain(
             optimizer_allocated_mem = optimizer_peak_mem = 0.0
             rem_vram_alloc = rem_vram_peak = 0.0
 
-        # Update token counter (assuming labels length == tokens trained)
+        # Update token counter
         cumulative_tokens += labels.numel()
 
         # --- Log metrics to wandb ---
-        wandb.log({
-            "lm_loss": loss.item(),
-            "iters_per_sec": iters_per_sec,
-            "cumulative_tokens": cumulative_tokens,
-            "params_VRAM_MB": param_mem,
-            "optimizer_state_VRAM_MB": opt_mem,
-            "batch_VRAM_MB": batch_mem,
-            "labels_VRAM_MB": labels_mem,
-            "activations_VRAM_MB": total_activation_mem,
-            "allocated_VRAM_MB": allocated_mem,
-            "peak_allocated_VRAM_MB": peak_mem,
-            "forward_allocated_VRAM_MB": forward_allocated_mem,
-            "forward_peak_VRAM_MB": forward_peak_mem,
-            "backward_allocated_VRAM_MB": backward_allocated_mem,
-            "backward_peak_VRAM_MB": backward_peak_mem,
-            "optimizer_allocated_VRAM_MB": optimizer_allocated_mem,
-            "optimizer_peak_VRAM_MB": optimizer_peak_mem,
-            "rem_vram_alloc_MB": rem_vram_alloc,
-            "rem_vram_peak_MB": rem_vram_peak,
-        }, step=i)
+        wandb.log(
+            {
+                "lm_loss": loss.item(),
+                "iters_per_sec": iters_per_sec,
+                "cumulative_tokens": cumulative_tokens,
+                "params_VRAM_MB": param_mem,
+                "optimizer_state_VRAM_MB": opt_mem,
+                "batch_VRAM_MB": batch_mem,
+                "labels_VRAM_MB": labels_mem,
+                "activations_VRAM_MB": total_activation_mem,
+                "allocated_VRAM_MB": allocated_mem,
+                "peak_allocated_VRAM_MB": peak_mem,
+                "forward_allocated_VRAM_MB": forward_allocated_mem,
+                "forward_peak_VRAM_MB": forward_peak_mem,
+                "backward_allocated_VRAM_MB": backward_allocated_mem,
+                "backward_peak_VRAM_MB": backward_peak_mem,
+                "optimizer_allocated_VRAM_MB": optimizer_allocated_mem,
+                "optimizer_peak_VRAM_MB": optimizer_peak_mem,
+                "rem_vram_alloc_MB": rem_vram_alloc,
+                "rem_vram_peak_MB": rem_vram_peak,
+            },
+            step=i,
+        )
 
         # --- Checkpoint + JSON dump ---
         if i % checkpoint_frequency == 0 or i == num_iters - 1:
@@ -238,27 +249,37 @@ def pretrain(
                 f"Bwd {backward_allocated_mem:.1f}/{backward_peak_mem:.1f}MB, "
                 f"Opt step {optimizer_allocated_mem:.1f}/{optimizer_peak_mem:.1f}MB"
             )
-            checkpoint_path = os.path.join(ckpt, f"{model_name}-iter{i}.pt")
-            torch.save({
-                "iter": i,
-                "model_state_dict": net.state_dict(),
-                "optimizer_state_dict": optim.state_dict(),
-                "loss": loss.item(),
-            }, checkpoint_path)
+
+            # Save checkpoint
+            checkpoint_path = os.path.join(weights_dir, f"{model_name}-iter{i}.pt")
+            torch.save(
+                {
+                    "iter": i,
+                    "model_state_dict": net.state_dict(),
+                    "optimizer_state_dict": optim.state_dict(),
+                    "loss": loss.item(),
+                },
+                checkpoint_path,
+            )
             print(f"[iter {i}] Saved checkpoint to {checkpoint_path}")
 
-            # Dump total activation VRAM to JSON
-            json_path = os.path.join(ckpt, f"{model_name}-activations-iter{i}.json")
+            # Save activations
+            json_path = os.path.join(memory_layout_dir, f"{model_name}-activations-iter{i}.json")
             with open(json_path, "w") as f:
                 json.dump(activation_stats, f)
             print(f"[iter {i}] Saved activation VRAM JSON to {json_path}")
 
+            # Save metrics
             param_count = sum(p.numel() for p in net.parameters())
-
-            # Get batch size and seq length from the actual tensor
             batch_size, seq_len = batch.shape[0], batch.shape[1]
-            # Rough FLOPs estimate: ~2 * params * seq_len * batch_size
             est_flops = 2 * param_count * seq_len * batch_size
+
+            vis_folder = os.path.join(ckpt, 'visualizations')
+            plot_visualizations(net, vis_folder, i)
+
+            # Validation
+            avg_val_loss = run_validation(net, val_dataloader, device, max_steps=num_val_iters, step=i)
+            print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}")
 
             metrics = {
                 "iter": i,
@@ -266,31 +287,16 @@ def pretrain(
                 "trained_tokens": cumulative_tokens,
                 "param_count": param_count,
                 "estimated_flops": est_flops,
+                "val_loss" : avg_val_loss
             }
-
-            metrics_path = os.path.join(ckpt, f"{model_name}-metrics-iter{i}.json")
+            metrics_path = os.path.join(metrics_dir, f"{model_name}-metrics-iter{i}.json")
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f, indent=2)
             print(f"[iter {i}] Saved training metrics JSON to {metrics_path}")
 
+        activation_stats.clear()
 
-            plot_visualizations(
-                net, 
-                ckpt,
-                i
-            )
-            
-            # ---- Validation run ----
-            avg_val_loss = run_validation(
-                net, val_dataloader, device, max_steps=num_val_iters, step=i
-            )
-            print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}")
-
-
-
-        activation_stats.clear()  # reset after each forward to prevent blowup
-            
-    # Cleanup hooks after training
+    # Cleanup hooks
     for h in hooks:
         h.remove()
 
@@ -324,6 +330,20 @@ def main():
     assert os.path.exists(validation_data_config), f"Data config not found: {validation_data_config}"
     assert os.path.exists(model_config), f"Model config not found: {model_config}"
     assert os.path.exists(training_config), f"Training config not found: {training_config}"
+
+    # ---- Create checkpoint folder here ----
+    checkpoint_folder_name = f"{conf['experiment_name']}-run-{time.strftime('%Y-%m-%d-%H-%M-%S')}".strip().replace(" ", "-")
+    ckpt = os.path.join("checkpoints", checkpoint_folder_name)
+    os.makedirs(ckpt, exist_ok=True)
+
+    # ---- Copy configs into checkpoint folder ----
+    for cfg_path in [model_config, training_config, training_data_config, validation_data_config]:
+        shutil.copy(cfg_path, ckpt)
+    if tokenizer_path and os.path.exists(tokenizer_path):
+        shutil.copy(tokenizer_path, ckpt)
+
+    print(f"Configs copied to checkpoint folder: {ckpt}")
+
 
     # Load tokenizer
     tokenizer = load_tokenizer(tokenizer_path)
@@ -389,6 +409,7 @@ def main():
         conf["checkpoint_frequency"],
         conf["experiment_name"],
         name,
+        ckpt
     )
 
 
