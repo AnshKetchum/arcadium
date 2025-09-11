@@ -139,3 +139,10 @@ class BasicTokenizer(BaseTokenizer):
         self.mapping = data["mapping"]
         self.reverse_mapping = data["reverse_mapping"]
         print("Successfully loaded", len(self.mapping), "tokens from", file_path)
+
+    def summary(self):
+        vocab_size = len(self.mapping)
+        print(f"Tokenizer summary:")
+        print(f"  Vocabulary size: {vocab_size}")
+        print(f"  Token IDs range from 0 to {vocab_size - 1}")
+
