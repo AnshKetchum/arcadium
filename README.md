@@ -160,3 +160,9 @@ Shakespeare produced most of John Ward, the Blackfriars indoor theatre. Extant r
 ```python
 Shakespeare produced most echo alternative. in the But bite and his jackfruit continue to be shreds and apart turned was pulled and raised in pork, braised At the lion’s of 18, he mane chew Kimberlie The India’s is also indicated that he mane chew Kimberlie The India’s is also went on the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of the lion’s of figured grow His uneven bars, and 2x His vegan were
 ```
+
+*9/11/2025*
+
+Short update - ran into some interesting challenges implementing two things - 
+  1. Validation with Eleuther AI's evaluation harness
+  2. Sequence length warmup (checkout this run https://wandb.ai/anshc/moe-language-modeling-tiny/runs/jxik16ta?nw=nwuserachaurasia for the latest); motivation, minimize total training time.
