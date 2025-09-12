@@ -10,7 +10,10 @@ DATA_ARGS=(
   --training_config configs/training/basic.yaml
 )
 
+# Generate timestamp
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
 # Run training with both sets of args
 python pretrain_language.py \
   "${MODEL_ARGS[@]}" \
-  "${DATA_ARGS[@]}" | tee logs/out.log
+  "${DATA_ARGS[@]}" | tee "logs/out_${TIMESTAMP}.log"

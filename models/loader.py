@@ -11,7 +11,7 @@ from models.tasks.language.architecture import LanguageModel
 from models.tasks.language.language_tokenizer import BasicTokenizer
 
 # Datasets
-from models.tasks.language.datasets.single_file import DocumentLanguageModelDatasetFromFileRandomSampling
+from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
 from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
 from models.tasks.language.datasets.multi_dataset import AggregatedRoundRobinDataset
 
@@ -40,7 +40,7 @@ def load_prexisting_tokenizer(tokenizer_path: str):
     return tok
 
 
-def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: int, model_vocab_size: int): 
+def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: int, model_vocab_size: int, debug = False): 
 
     conf = load_config(data_config, "parameters")
 
@@ -50,6 +50,7 @@ def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: i
         datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
             fldr, 
             sequence_length,
+            debug=debug
         ))
 
     return AggregatedRoundRobinDataset(datasets)

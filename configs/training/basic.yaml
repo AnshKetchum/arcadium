@@ -3,9 +3,14 @@ parameters:
   epochs: 1000
   val_steps: 10
   checkpoint_frequency: 100
-  batch_size: 8
-  num_workers: 2
+  batch_size: 2
+  num_workers: 0
   sequence_length: 32
   lr: 0.001
+  training_sequence_length:
+    start: 32
+    end: 1024
+    steps: 500
+  validation_sequence_length: 256
   training_data_config: "configs/data/simple-corpus.yaml"
   validation_data_config: "configs/data/simple-corpus.yaml"

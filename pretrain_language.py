@@ -9,6 +9,7 @@ import os
 import time
 import wandb
 from models.loader import load_language_model, load_dataset, load_tokenizer
+from models.tasks.language.datasets.sequence_length import SequenceLengthSampler
 from utils import load_config
 from dotenv import load_dotenv 
 from torchinfo import summary
@@ -141,7 +142,6 @@ def pretrain(
     cumulative_tokens = 0
 
     for i in range(num_iters):
-        start_time = time.time()
         optim.zero_grad()
 
         try:
@@ -157,29 +157,40 @@ def pretrain(
         # --- Forward pass ---
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
+        t0 = time.time()
         logits, loss = training_step(net, batch=batch, labels=labels)
+        t1 = time.time()
         if torch.cuda.is_available():
             forward_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
             forward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
+        forward_time = t1 - t0
 
         # --- Backward pass ---
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
+        t2 = time.time()
         loss.backward()
+        t3 = time.time()
         if torch.cuda.is_available():
             backward_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
             backward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
+        backward_time = t3 - t2
 
         # --- Optimizer step ---
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
+        t4 = time.time()
         optim.step()
+        t5 = time.time()
         if torch.cuda.is_available():
             optimizer_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
             optimizer_peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
+        optimizer_time = t5 - t4
 
-        elapsed = time.time() - start_time
-        iters_per_sec = 1 / elapsed if elapsed > 0 else 0.0
+        # --- Timing summary ---
+        elapsed = forward_time + backward_time + optimizer_time
+        iters_per_sec = 1.0 / elapsed if elapsed > 0 else 0.0
+
 
         # --- Compute activation memory from hooks ---
         total_activation_mem = sum(activation_stats.values())  # MB
@@ -217,9 +228,11 @@ def pretrain(
         wandb.log(
             {
                 "lm_loss": loss.item(),
+                "iter_time" : elapsed,
                 "iters_per_sec": iters_per_sec,
                 "cumulative_tokens": cumulative_tokens,
                 "params_VRAM_MB": param_mem,
+                "train_sequence_length" : batch.shape[1],
                 "optimizer_state_VRAM_MB": opt_mem,
                 "batch_VRAM_MB": batch_mem,
                 "labels_VRAM_MB": labels_mem,
@@ -238,6 +251,7 @@ def pretrain(
             step=i,
         )
 
+        
         # --- Checkpoint + JSON dump ---
         if i % checkpoint_frequency == 0 or i == num_iters - 1:
             print(
@@ -295,6 +309,7 @@ def pretrain(
             print(f"[iter {i}] Saved training metrics JSON to {metrics_path}")
 
         activation_stats.clear()
+        # training_seqlen.next_seqlen()
 
     # Cleanup hooks
     for h in hooks:
@@ -363,16 +378,29 @@ def main():
     summary(net, input_data=x)
 
     # Train Dataset + dataloader
-    train_dataset = load_dataset(training_data_config, tokenizer, conf["sequence_length"], net.get_output_dimension())
+    training_sequence_length_conf = conf["training_sequence_length"]
+    train_dataset = load_dataset(training_data_config, tokenizer, training_sequence_length_conf["start"], net.get_output_dimension(), debug=False)
+
+    seqlen_sampler = SequenceLengthSampler(
+        len(train_dataset),
+        conf["batch_size"],
+        training_sequence_length_conf["start"],
+        training_sequence_length_conf["end"],
+        training_sequence_length_conf["steps"],
+        name="train_scheduler",
+        shuffle=False,
+    )
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=conf["batch_size"],
-        shuffle=True,
         num_workers=conf["num_workers"],
+        sampler=seqlen_sampler
     )
 
     # Train Dataset + dataloader
-    val_dataset = load_dataset(validation_data_config, tokenizer, conf["sequence_length"], net.get_output_dimension())
+    val_sequence_length = conf["validation_sequence_length"]
+    val_dataset = load_dataset(validation_data_config, tokenizer, val_sequence_length, net.get_output_dimension(), debug=False)
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=conf["batch_size"],
