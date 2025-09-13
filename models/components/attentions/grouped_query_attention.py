@@ -68,7 +68,7 @@ class GroupedQueryAttention(nn.Module):
         out = self.o_proj(attn_output)
 
         self.metadata_storage = {
-            "attention_probabilities" : attn_probs
+            "attention_probabilities" : attn_probs.reshape(B, self.num_groups * self.num_queries_per_group, T, T)
         }
 
         return out
