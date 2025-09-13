@@ -2,6 +2,10 @@
 
 also, to train an MoE model :D
 
+# Accomplishments ... so far
+1. Partial replication of the GQA graph from the paper on an 8 GB VRAM GPU: [https://arxiv.org/pdf/2305.13245](https://arxiv.org/pdf/2305.13245). Varied the GQA groups for 1 layer. See [this image](https://github.com/AnshKetchum/arcadium/blob/main/story/gqa_benchmark_replication.png) for the actual plot 
+
+
 # Setup 
 
 ```bash
