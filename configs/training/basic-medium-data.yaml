@@ -7,5 +7,10 @@ parameters:
   num_workers: 2
   sequence_length: 32
   lr: 0.001
+  training_sequence_length:
+    start: 32
+    end: 256
+    steps: 500
+  validation_sequence_length: 256
   training_data_config: "configs/data/medium-corpus.yaml"
   validation_data_config: "configs/data/medium-corpus.yaml"

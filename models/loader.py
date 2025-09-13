@@ -7,12 +7,12 @@ from typing import Tuple
 # mixture of experts
 from models.moe import MoETransformerParams, MoETransformer
 from models.moe import MoETransformer
-from models.tasks.language.model import LanguageModel
-from models.tasks.language.tokenizer import BasicTokenizer
+from models.tasks.language.architecture import LanguageModel
+from models.tasks.language.language_tokenizer import BasicTokenizer
 
 # Datasets
-from models.tasks.language.datasets.single_file import DocumentLanguageModelDatasetFromFileRandomSampling
-from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromFolderRandomSampling
+from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
+from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
 from models.tasks.language.datasets.multi_dataset import AggregatedRoundRobinDataset
 
 from utils import load_config
@@ -26,19 +26,10 @@ def ingest_file(fl: str, tok: BasicTokenizer):
 
     tok.ingest(tokens)
 
-def load_tokenizer(data_config: str):
-
-    conf = load_config(data_config, "parameters")
+def load_tokenizer(tokenizer_path: str):
 
     tok = BasicTokenizer()
-
-    for fl in conf.get("files", []):
-        ingest_file(fl, tok)
-    
-    for fldr in conf.get("folders", []):
-        for fl in os.listdir(fldr):
-            ingest_file(os.path.join(fldr, fl), tok)
-        
+    tok.load(tokenizer_path)
     return tok
 
 def load_prexisting_tokenizer(tokenizer_path: str):
@@ -49,24 +40,17 @@ def load_prexisting_tokenizer(tokenizer_path: str):
     return tok
 
 
-def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: int, model_vocab_size: int): 
+def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: int, model_vocab_size: int, debug = False): 
 
     conf = load_config(data_config, "parameters")
 
     datasets = []
 
-    for fl in conf.get("files",  []):
-        datasets.append(DocumentLanguageModelDatasetFromFileRandomSampling(
-            fl, 
-            tokenizer, 
-            sequence_length,
-        ))
-
     for fldr in conf.get("folders", []):
-        datasets.append(DocumentLanguageModelDatasetFromFolderRandomSampling(
+        datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
             fldr, 
-            tokenizer, 
             sequence_length,
+            debug=debug
         ))
 
     return AggregatedRoundRobinDataset(datasets)
