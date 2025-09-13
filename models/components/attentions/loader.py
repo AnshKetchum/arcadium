@@ -13,7 +13,7 @@ class AttentionParameters(BaseModel):
 def load_attention(config: AttentionParameters):
     MULTI_HEAD = "multi-head" 
     MULTI_QUERY = "multi-query" 
-    GROUP_QUERY = "group-query" 
+    GROUP_QUERY = "grouped-query" 
 
     attention_config = config.model_dump()
 

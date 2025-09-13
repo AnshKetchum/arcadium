@@ -17,7 +17,7 @@ def scaled_dot_product_attention(q, k, v, d_k):
     return attention, values
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_kv_heads=8, embedding_dimension=1024, head_dimension = 512):
+    def __init__(self, num_kv_heads=8, embedding_dimension=1024, head_dimension = 512, **kwargs):
         super().__init__()
         self.embedding_dimension = embedding_dimension
         self.num_heads = num_kv_heads # Called num kv heads but really should be num qkv heads

@@ -11,7 +11,7 @@ from models.components.attentions.utils import get_default_causal_mask
 import math
 
 class GroupedQueryAttention(nn.Module):
-    def __init__(self, num_query_heads=8, num_kv_heads = 8, embedding_dimension=1024, head_dimension = 512):
+    def __init__(self, num_query_heads=8, num_kv_heads = 8, embedding_dimension=1024, head_dimension = 512, **kwargs):
         super().__init__()
         self.embedding_dimension = embedding_dimension
         self.head_dimension = head_dimension
@@ -68,7 +68,7 @@ class GroupedQueryAttention(nn.Module):
         out = self.o_proj(attn_output)
 
         self.metadata_storage = {
-            "attention_probabilities" : attn_probs
+            "attention_probabilities" : attn_probs.reshape(B, self.num_groups * self.num_queries_per_group, T, T)
         }
 
         return out
