@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel
 
-from models.components.base import Attention
+from models.components.attentions import load_attention, AttentionParameters
 from models.components.moe_layer import MoE
 
 class MoEModelParams(BaseModel):
@@ -13,10 +13,11 @@ class MoEDecoderParams(BaseModel):
   input_dimension: int = 1024
   output_dimension : int  = 1024
   hidden_dimension: int = 1024
-  heads: int = 8
   experts: int = 8 
   norm_eps: float = 1e-5
   top_k: int = 2
+  attention: AttentionParameters
+
 
 class MoETransformerParams(BaseModel):
   model: MoEModelParams
@@ -29,7 +30,7 @@ class MoEDecoder(nn.Module):
     self.output_dimension = decoder_config.output_dimension
     self.hidden_dimension = decoder_config.hidden_dimension
 
-    self.attn = Attention(decoder_config.heads, decoder_config.input_dimension)
+    self.attn = load_attention(decoder_config.attention)
 
     self.pre_norm = nn.RMSNorm(self.input_dimension, eps = decoder_config.norm_eps, elementwise_affine=True)
     self.post_attn_norm = nn.RMSNorm(self.input_dimension, eps = decoder_config.norm_eps, elementwise_affine=True)

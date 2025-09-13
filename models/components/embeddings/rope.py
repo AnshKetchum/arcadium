@@ -39,6 +39,7 @@ class RoPE(nn.Module):
 
         # Apply rotation
         x1, x2 = x[..., ::2], x[..., 1::2]  # even/odd split
+        print(x1.shape, x2.shape)
         x_rot = torch.cat([x1 * cos[..., ::2] - x2 * sin[..., ::2],
                            x1 * sin[..., ::2] + x2 * cos[..., ::2]], dim=-1)
         return x_rot

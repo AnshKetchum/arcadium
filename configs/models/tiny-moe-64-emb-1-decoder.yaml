@@ -8,8 +8,14 @@ parameters:
       input_dimension: 64
       output_dimension: 64
       hidden_dimension: 64
-      heads: 8
       experts: 8
       norm_eps: 1e-5
+      attention:
+        type: "multi-head"
+        num_query_heads: 8
+        num_kv_heads: 8
+        embedding_dimension: 64
+        head_dimension: 32
+
 language_model:
   vocab_size: 4096
