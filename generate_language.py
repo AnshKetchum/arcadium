@@ -17,7 +17,18 @@ def sample_highest_prob(logits):
     next_token_id = optimal_index[:, -1].item()
     return next_token_id
 
-def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, device: torch.device, max_output_length: int = 100, name: str = "", generation_folder: str = "", checkpoint_path: str = "", tokenizer_path: str = "", profile_steps: int = 0):
+def generate(
+    input_data: str,
+    tokenizer: BasicTokenizer,
+    net: LanguageModel,
+    device: torch.device,
+    max_output_length: int = 100,
+    name: str = "",
+    generation_folder: str = "",
+    checkpoint_path: str = "",
+    tokenizer_path: str = "",
+    profile_steps: int = 0,
+):
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
@@ -26,14 +37,24 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
     new_tokens = []
     profiler_ctx = (
         profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA] if torch.cuda.is_available() else [ProfilerActivity.CPU],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(os.path.join(generation_folder, "profile")),
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+            if torch.cuda.is_available()
+            else [ProfilerActivity.CPU],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                os.path.join(generation_folder, "profile")
+            ),
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
             with_flops=True,
-        ) if profile_steps > 0 else None
+        )
+        if profile_steps > 0
+        else None
     )
+
+    per_token_times = []
+    time_to_first_token = None
+    prev_time = time.time()
 
     with torch.no_grad():
         if profiler_ctx:
@@ -43,7 +64,9 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
             if profiler_ctx and i >= profile_steps:
                 break
 
-            input_tensor = torch.tensor([tokenized_input_data], device=device, dtype=torch.int)
+            input_tensor = torch.tensor(
+                [tokenized_input_data], device=device, dtype=torch.int
+            )
 
             if profiler_ctx:
                 with record_function("logits_generation"):
@@ -52,6 +75,15 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
                 logits = net(input_tensor)
 
             next_token_id = sample_highest_prob(logits)
+
+            now = time.time()
+            if len(new_tokens) == 0:
+                # Time to first token
+                time_to_first_token = now - prev_time
+            else:
+                # Time per token
+                per_token_times.append(now - prev_time)
+            prev_time = now
 
             if next_token_id == tokenizer.get_end_of_sequence_token():
                 print("EOS Token reached")
@@ -69,19 +101,27 @@ def generate(input_data: str, tokenizer: BasicTokenizer, net: LanguageModel, dev
     output = " ".join(BasicTokenizer.get_tokens(input_data) + new_tokens)
     if os.path.exists(generation_folder) and os.path.isdir(generation_folder):
         data = {
-            "output" : output, 
+            "output": output,
             "max_output_length": max_output_length,
-            "model_name" : name,
-            "checkpoint_path" : checkpoint_path,
-            "tokenizer_path" : tokenizer_path,
-            "total_generated_tokens" : len(new_tokens),
-            "total_length_tokens" : len(BasicTokenizer.get_tokens(input_data)) + len(new_tokens),
-            "profiled_steps" : profile_steps
+            "model_name": name,
+            "checkpoint_path": checkpoint_path,
+            "tokenizer_path": tokenizer_path,
+            "total_generated_tokens": len(new_tokens),
+            "total_length_tokens": len(BasicTokenizer.get_tokens(input_data))
+            + len(new_tokens),
+            "profiled_steps": profile_steps,
+            "time_to_first_token": time_to_first_token,
+            "per_token_times": per_token_times,
+            "mean_per_token_time": sum(per_token_times) / len(per_token_times)
+            if per_token_times
+            else None,
         }
 
-        save_path = os.path.join(generation_folder, f"generation-{time.strftime('%Y-%m-%d_%H-%M-%S')}.json")
+        save_path = os.path.join(
+            generation_folder, f"generation-{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        )
         with open(save_path, "w") as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=2)
 
     return output
 
