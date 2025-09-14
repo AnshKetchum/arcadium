@@ -442,14 +442,12 @@ def main():
 
     print(f"Configs copied to checkpoint folder: {ckpt}")
 
-    # Load tokenizer
-    tokenizer = load_tokenizer(tokenizer_path)
-
     # Hardware
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load model
-    name, model_type, net = load_language_model(model_config, device)
+    name, model_type, net, tokenizer = load_language_model(model_config, device)
+    print("Loaded tokenizer with size", tokenizer.size())
 
     # Verify that the tokenizer is valid for the model (i.e that the model's vocab size is at least the value you see there)
     assert net.vocab_size >= tokenizer.size(), f"Model vocab size of {net.vocab_size} is too low for tokenizer size of {tokenizer.size()}"
@@ -460,7 +458,7 @@ def main():
 
     # Train Dataset + dataloader
     training_sequence_length_conf = conf["training_sequence_length"]
-    train_dataset = load_dataset(training_data_config, tokenizer, training_sequence_length_conf["start"], net.get_output_dimension(), debug=False)
+    train_dataset = load_dataset(training_data_config,  training_sequence_length_conf["start"], debug=False)
 
     seqlen_sampler = SequenceLengthSampler(
         len(train_dataset),
@@ -481,7 +479,7 @@ def main():
 
     # Validation Dataset + dataloader
     val_sequence_length = conf["validation_sequence_length"]
-    val_dataset = load_dataset(validation_data_config, tokenizer, val_sequence_length, net.get_output_dimension(), debug=False)
+    val_dataset = load_dataset(validation_data_config, val_sequence_length, debug=False)
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=conf["batch_size"],

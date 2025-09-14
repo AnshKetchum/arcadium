@@ -8,7 +8,8 @@ from typing import Tuple
 from models.moe import MoETransformerParams, MoETransformer
 from models.moe import MoETransformer
 from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.language_tokenizer import BasicTokenizer
+from models.tasks.language.tokenizers.base import BaseTokenizer, BasicTokenizer
+from models.tasks.language.tokenizers.huggingface import HuggingFaceTokenizer
 
 # Datasets
 from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
@@ -26,21 +27,21 @@ def ingest_file(fl: str, tok: BasicTokenizer):
 
     tok.ingest(tokens)
 
-def load_tokenizer(tokenizer_path: str):
+def load_tokenizer(tokenizer_path: str, tokenizer_type: str = "basic", **kwargs):
+    BASIC_TOKENIZER = "basic"
+    HUGGINGFACE_TOKENIZER = "huggingface"
 
-    tok = BasicTokenizer()
-    tok.load(tokenizer_path)
+    if tokenizer_type == BASIC_TOKENIZER:
+        tok = BasicTokenizer()
+    elif tokenizer_type == HUGGINGFACE_TOKENIZER:
+        tok = HuggingFaceTokenizer(kwargs["model_name"])
+    
+    if tokenizer_path and os.path.exists(tokenizer_path):
+        tok.load(tokenizer_path)
+    
     return tok
 
-def load_prexisting_tokenizer(tokenizer_path: str):
-
-    assert os.path.exists(tokenizer_path) and os.path.isfile(tokenizer_path)
-    tok = BasicTokenizer()
-    tok.load(tokenizer_path)
-    return tok
-
-
-def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: int, model_vocab_size: int, debug = False): 
+def load_dataset(data_config: str, sequence_length: int, debug = False): 
 
     conf = load_config(data_config, "parameters")
 
@@ -55,13 +56,15 @@ def load_dataset(data_config: str, tokenizer: BasicTokenizer, sequence_length: i
 
     return AggregatedRoundRobinDataset(datasets)
 
-def load_language_model(configuration_path: str, device: torch.device) -> Tuple[str, str, LanguageModel]:
+def load_language_model(configuration_path: str, device: torch.device) -> Tuple[str, str, LanguageModel, BaseTokenizer]:
     # Load the entire model configuration
-    yaml_conf = OmegaConf.load(configuration_path)
+    conf_dict = load_config(configuration_path, "parameters")
 
-    # Grab the configuration as a dict
-    conf_params = OmegaConf.to_container(yaml_conf, resolve=True)
-    conf_dict = conf_params["parameters"]
+    ## Loading the tokenizer 
+    tokenizer_config = load_config(conf_dict['tokenizer']['config'], "parameters")
+    tokenizer = load_tokenizer(**tokenizer_config)
+    
+    ## Loading the model
 
     # Extract name
     conf_name = conf_dict["name"]
@@ -74,10 +77,9 @@ def load_language_model(configuration_path: str, device: torch.device) -> Tuple[
     conf = MoETransformerParams(**conf_dict["configuration"])
 
     if conf_type == "moe":
-        vocab_size = conf_params["language_model"]["vocab_size"]
-        net = LanguageModel(MoETransformer, conf, vocab_size)
+        net = LanguageModel(MoETransformer, conf, tokenizer.size())
         net = net.to(device)
     if conf_type == "dense":
         raise NotImplementedError()
 
-    return conf_name, conf_type, net
+    return conf_name, conf_type, net, tokenizer

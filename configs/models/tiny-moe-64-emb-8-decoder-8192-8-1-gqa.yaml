@@ -16,6 +16,5 @@ parameters:
         num_kv_heads: 1
         embedding_dimension: 64
         head_dimension: 32
-
-language_model:
-  vocab_size: 8192
+    tokenizer:
+      config: configs/tokenizer/basic-8192.yaml

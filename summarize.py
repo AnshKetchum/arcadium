@@ -11,7 +11,7 @@ params = MoETransformerParams(
     decoder=MoEDecoderParams() 
 )
 
-name, model_type, net = load_language_model("configs/models/tiny-moe.yaml", device )
+name, model_type, net, tokenizer = load_language_model("configs/models/tiny-moe.yaml", device )
 
 # batch=1, seq_len=128, hidden_dim=1024
 x = torch.zeros((1, 128), dtype=torch.long).to(device)

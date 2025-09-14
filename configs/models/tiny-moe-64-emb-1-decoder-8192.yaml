@@ -16,5 +16,5 @@ parameters:
         head_dimension: 32
       experts: 8
       norm_eps: 1.0e-05
-language_model:
-  vocab_size: 8192
+    tokenizer:
+      config: configs/tokenizer/basic-8192.yaml

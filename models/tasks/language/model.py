@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
 from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.language_tokenizer import BasicTokenizer
+from models.tasks.language.tokenizers.base import BasicTokenizer
 from models.loader import load_language_model  # your existing loader
 
 
@@ -26,15 +26,14 @@ class MyLMHF(PreTrainedModel):
             raise ValueError("Must provide a YAML config_path to build model")
 
         # Load your model using existing loader
-        _, _, net = load_language_model(config.config_path, device)
+        _, _, net, tokenizer = load_language_model(config.config_path, device)
         self.lm = net
 
         # Load tokenizer
         if config.tokenizer_path is None:
             raise ValueError("Must provide tokenizer_path")
-        self.tokenizer = BasicTokenizer()
-        self.tokenizer.load(config.tokenizer_path)
-
+        self.tokenizer = tokenizer 
+        
         # Store our own device reference (avoids conflict with HF property)
         self._device = torch.device(device)
         self.lm.to(self._device)

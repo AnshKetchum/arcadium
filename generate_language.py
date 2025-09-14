@@ -5,10 +5,12 @@ import torch.nn as nn
 import json
 import os 
 from dotenv import load_dotenv 
-from models.loader import load_prexisting_tokenizer, load_language_model
-from models.tasks.language.language_tokenizer import BasicTokenizer
+from models.loader import load_language_model, load_tokenizer
+from models.tasks.language.tokenizers.base import BasicTokenizer
 from models.tasks.language.architecture import LanguageModel
 from torch.profiler import profile, record_function, ProfilerActivity
+
+from utils import load_config
 
 load_dotenv()
 
@@ -32,7 +34,6 @@ def generate(
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
-    tokenized_input_data.insert(0, tokenizer.get_beginning_of_sequence_token())
 
     new_tokens = []
     profiler_ctx = (
@@ -123,6 +124,7 @@ def generate(
         with open(save_path, "w") as f:
             json.dump(data, f, indent=2)
 
+    print(tokenized_input_data)
     return output
 
 
@@ -166,11 +168,8 @@ if __name__ == "__main__":
     # Hardware
     device = torch.device(hardware_device if torch.cuda.is_available() else "cpu")
 
-    # Load tokenizer
-    tokenizer = load_prexisting_tokenizer(tokenizer_path)
-
     # Load net 
-    name, model_type, net = load_language_model(model_config, device)
+    name, model_type, net, tokenizer = load_language_model(model_config, device)
     checkpoint = torch.load(checkpoint_path)
     net.load_state_dict(checkpoint["model_state_dict"])
 

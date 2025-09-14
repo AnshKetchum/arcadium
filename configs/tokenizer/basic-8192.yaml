@@ -1,0 +1,5 @@
+parameters:
+  tokenizer_type: "basic"
+  tokenizer_path: "tokenizers/basic-8192"
+  model_name: ""
+  

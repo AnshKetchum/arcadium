@@ -2,7 +2,8 @@ import argparse
 import os
 import pickle
 
-from models.tasks.language.language_tokenizer import BasicTokenizer
+from models.loader import load_tokenizer, load_config
+from models.tasks.language.tokenizers.base import BasicTokenizer
 
 
 if __name__ == '__main__':
@@ -22,6 +23,13 @@ if __name__ == '__main__':
     parser.add_argument(
         "--tokenizer_path",
         type=str,
+        required=False,
+        default=None,
+        help="Path to serialized tokenizer"
+    )
+    parser.add_argument(
+        "--tokenizer_config",
+        type=str,
         required=True,
         help="Path to serialized tokenizer"
     )
@@ -35,8 +43,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Load the tokenizer
-    tok = BasicTokenizer()
-    tok.load(args.tokenizer_path)
+    config = load_config(args.tokenizer_config, "parameters")
+    tok = load_tokenizer(**config)
+
+    if args.tokenizer_path:
+        print("Custom load path specified, loading from", args.tokenizer_path)
+        tok.load(args.tokenizer_path)
 
     # Ingest all relevant files
     all_documents = []
