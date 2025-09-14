@@ -1,6 +1,6 @@
 import torch 
 from torchinfo import summary
-from models.moe import MoETransformerParams, MoEDecoderParams, MoEModelParams
+from models.tasks.language.backbones.moe import MoETransformerParams, MoEDecoderParams, MoEModelParams
 from models.loader import load_language_model
 
 # Instantiate a representation of hardware

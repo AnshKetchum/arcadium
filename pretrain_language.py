@@ -408,6 +408,12 @@ def main():
                         help="Path to tokenizer file")
     parser.add_argument("--profile", type=int, default=0,
                         help="Number of training iterations to profile (0 to disable)")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose outputs"
+    )
+
 
     args = parser.parse_args()
 
@@ -416,6 +422,7 @@ def main():
     training_config = args.training_config
     tokenizer_path = args.tokenizer_path
     profile_steps = args.profile
+    debug = args.verbose
 
     # Training configuration
     conf = load_config(training_config, "parameters")
@@ -458,7 +465,7 @@ def main():
 
     # Train Dataset + dataloader
     training_sequence_length_conf = conf["training_sequence_length"]
-    train_dataset = load_dataset(training_data_config,  training_sequence_length_conf["start"], debug=False)
+    train_dataset = load_dataset(training_data_config,  training_sequence_length_conf["start"], debug=debug, val = False)
 
     seqlen_sampler = SequenceLengthSampler(
         len(train_dataset),
@@ -479,7 +486,7 @@ def main():
 
     # Validation Dataset + dataloader
     val_sequence_length = conf["validation_sequence_length"]
-    val_dataset = load_dataset(validation_data_config, val_sequence_length, debug=False)
+    val_dataset = load_dataset(validation_data_config, val_sequence_length, debug=debug, val = True)
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=conf["batch_size"],

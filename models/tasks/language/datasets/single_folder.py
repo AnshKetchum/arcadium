@@ -9,7 +9,7 @@ class DocumentLanguageModelDatasetFromShardsRandomSampling(Dataset):
     Dataset that loads pre-tokenized shards (pickled) and samples sequences randomly
     in a round-robin manner across shards, with dynamic sequence lengths.
     """
-    def __init__(self, shard_folder: str, sequence_length: int, debug = False):
+    def __init__(self, shard_folder: str, sequence_length: int, debug = False, **kwargs):
         super().__init__()
         self.shard_folder = shard_folder
         self.sequence_length = sequence_length

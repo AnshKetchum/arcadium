@@ -5,8 +5,14 @@ import os
 from typing import Tuple
 
 # mixture of experts
-from models.moe import MoETransformerParams, MoETransformer
-from models.moe import MoETransformer
+from models.tasks.language.backbones.moe import MoETransformerParams, MoETransformer
+from models.tasks.language.backbones.moe import MoETransformer
+
+# dense (gpt-like)
+from models.tasks.language.backbones.dense import DenseTransformerParams, DenseTransformer
+from models.tasks.language.backbones.dense import DenseTransformer
+
+
 from models.tasks.language.architecture import LanguageModel
 from models.tasks.language.tokenizers.base import BaseTokenizer, BasicTokenizer
 from models.tasks.language.tokenizers.huggingface import HuggingFaceTokenizer
@@ -14,6 +20,7 @@ from models.tasks.language.tokenizers.huggingface import HuggingFaceTokenizer
 # Datasets
 from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
 from models.tasks.language.datasets.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
+from models.tasks.language.datasets.fineweb import FineWebBinaryDataset
 from models.tasks.language.datasets.multi_dataset import AggregatedRoundRobinDataset
 
 from utils import load_config
@@ -41,18 +48,31 @@ def load_tokenizer(tokenizer_path: str, tokenizer_type: str = "basic", **kwargs)
     
     return tok
 
-def load_dataset(data_config: str, sequence_length: int, debug = False): 
+def load_dataset(data_config: str, sequence_length: int, debug = False, **kwargs): 
 
     conf = load_config(data_config, "parameters")
+    LOCAL = "local"
+    FINEWEB = "fineweb"
 
     datasets = []
 
-    for fldr in conf.get("folders", []):
-        datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
-            fldr, 
-            sequence_length,
-            debug=debug
-        ))
+    
+    if conf["type"] == LOCAL:
+        for fldr in conf.get("folders", []):
+            datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
+                fldr, 
+                sequence_length,
+                debug=debug,
+                **kwargs
+            ))
+    elif conf["type"] == FINEWEB:
+        for fldr in conf.get("folders", []):
+            datasets.append(FineWebBinaryDataset(
+                fldr, 
+                sequence_length,
+                debug=debug,
+                **kwargs
+            ))
 
     return AggregatedRoundRobinDataset(datasets)
 
@@ -73,13 +93,12 @@ def load_language_model(configuration_path: str, device: torch.device) -> Tuple[
     # Extract type
     conf_type = conf_dict["type"]
 
-    # Extract Configuration 
-    conf = MoETransformerParams(**conf_dict["configuration"])
-
     if conf_type == "moe":
+        conf = MoETransformerParams(**conf_dict["configuration"])
         net = LanguageModel(MoETransformer, conf, tokenizer.size())
-        net = net.to(device)
     if conf_type == "dense":
-        raise NotImplementedError()
+        conf = DenseTransformerParams(**conf_dict["configuration"])
+        net = LanguageModel(DenseTransformer, conf, tokenizer.size())
 
+    net = net.to(device)
     return conf_name, conf_type, net, tokenizer
