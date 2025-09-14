@@ -3,7 +3,7 @@
 also, to train an MoE model :D
 
 # Accomplishments ... so far
-1. Partial replication of Figure 6, GQA graph from the paper on an 8 GB VRAM GPU: [https://arxiv.org/pdf/2305.13245](https://arxiv.org/pdf/2305.13245). Varied the GQA groups for 1 layer. See [this image](https://github.com/AnshKetchum/arcadium/blob/main/story/gqa_benchmark_replication.png) for the actual plot 
+1. Replication of Google's GQA paper: [https://arxiv.org/pdf/2305.13245](https://arxiv.org/pdf/2305.13245). Varied the GQA groups for 1 layer. See [this WandDB report](https://wandb.ai/anshc/moe-language-modeling-tiny/reports/Grouped-Query-Attention-Verification-Report--VmlldzoxNDM2OTcyMg?accessToken=jb6ejl24axd9i7op0h2vpva5t610nu9rn84i6lxx5aihnj71s8sm5zo6zxr7f73b) for the actual plot 
 
 
 # Setup 
