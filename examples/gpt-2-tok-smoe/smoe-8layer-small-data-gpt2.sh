@@ -7,7 +7,7 @@ MODEL_ARGS=(
 
 # Define data/training args
 DATA_ARGS=(
-  --training_config configs/training/basic.yaml
+  --training_config configs/training/gpt-2.yaml
 )
 
 # Generate timestamp
