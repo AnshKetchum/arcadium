@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from models.components.activations import swiglu
 from models.components.embeddings.rope import RoPE
 from models.components.embeddings.sinusoidal import SinusoidalPositionalEmbedding
-from models.components.attentions.utils import get_default_causal_mask
+from models.components.attentions.utils import get_default_causal_mask, scaled_dot_product_attention
 
 import math
 
@@ -34,30 +34,26 @@ class MultiQueryAttention(nn.Module):
 
         # Project QKV
         q = self.q_proj(x).reshape(B, T, self.num_query_heads, self.head_dimension) # [B, T, QD]
-        kv = self.kv_proj(x) # [B, T, 2H]
-        k, v = kv.chunk(2, dim = -1) # [B, T, H]
+        kv = self.kv_proj(x).reshape(B, T, 2 * self.head_dimension).unsqueeze(2)
+        
+        k, v = kv.chunk(2, dim = -1) # [B, T, 1, H]
 
         # Rearrange for multi-head: [B, Q, T, H]
         q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
 
         # Apply RoPE to queries and keys
         q = self.positional_embedding(q)
         k = self.positional_embedding(k)
 
         # Scaled dot-product attention
-        attn_scores = torch.einsum("b q t d, b s d -> b q t s", q, k) / math.sqrt(self.head_dimension)
-
-        # Causal mask for autoregressive attention
         mask = get_default_causal_mask(T, x.device)  # [1, 1, T, T]
-        attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
-
-        attn_probs = F.softmax(attn_scores, dim=-1)
-
-        # [B, Q, T, T] x [B, T, D] => [B, T, D]
-        attn_output = torch.einsum("b q t s, b s d -> b t q d", attn_probs, v).reshape(B, T, self.num_query_heads * self.head_dimension)
+        attn_probs, attn_output = scaled_dot_product_attention(q, k, v, self.head_dimension, mask)
 
         # Merge heads
-        out = self.o_proj(attn_output)
+        out = attn_output.permute(0, 2, 1, 3).reshape(B, T, self.num_query_heads * self.head_dimension) 
+        out = self.o_proj(out)
 
         self.metadata_storage = {
             "attention_probabilities" : attn_probs

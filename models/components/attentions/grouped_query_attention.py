@@ -2,13 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-from models.components.activations import swiglu
 from models.components.embeddings.rope import RoPE
 from models.components.embeddings.sinusoidal import SinusoidalPositionalEmbedding
-from models.components.attentions.utils import get_default_causal_mask
-
-import math
+from models.components.attentions.utils import get_default_causal_mask, scaled_dot_product_attention
 
 class GroupedQueryAttention(nn.Module):
     def __init__(self, num_query_heads=8, num_kv_heads = 8, embedding_dimension=1024, head_dimension = 512, **kwargs):
@@ -24,8 +20,6 @@ class GroupedQueryAttention(nn.Module):
         # Project full embedding dimension to 3*embedding_dimension for QKV
         self.q_proj = nn.Linear(self.embedding_dimension, self.num_query_heads* self.head_dimension)
         self.kv_proj = nn.Linear(self.embedding_dimension, 2 * self.num_groups * self.head_dimension)
-        
-        #nn.Linear(embedding_dimension, 3 * embedding_dimension, bias=False)
         self.o_proj = nn.Linear(self.head_dimension * self.num_queries_per_group * self.num_groups, self.embedding_dimension, bias=False)
 
         self.positional_embedding = SinusoidalPositionalEmbedding(self.head_dimension)
@@ -51,21 +45,16 @@ class GroupedQueryAttention(nn.Module):
 
         # Scaled dot-product attention
         # [B, G, Q, T, D] x [B, G, 1, T, D] => [B, G, Q, T, T]
-        attn_scores = torch.einsum("b g q t d, b g k s d -> b g q t s", q, k) / math.sqrt(self.head_dimension)
+        # attn_scores = torch.einsum("b g q t d, b g k s d -> b g q t s", q, k) / math.sqrt(self.head_dimension)
         # attn_scores = torch.einsum("b q t d, b v s d -> b q v t s", q, k) / math.sqrt(self.head_dimension)
 
         # Causal mask for autoregressive attention
         mask = get_default_causal_mask(T, x.device)  # [1, 1, T, T]
-        attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
-
-        attn_probs = F.softmax(attn_scores, dim=-1)
-
-        # [B, G, Q, T, T] x [B, G, 1, T, D] => [B, G, Q, T, D] => [B, T, G, Q, D]
-        attn_output = torch.einsum("b g q t s, b g k s d -> b t g q d", attn_probs, v).reshape(B, T, self.num_groups * self.num_queries_per_group * self.head_dimension)
-        # attn_output = torch.einsum("b q k t s, b k s d -> b t q d", attn_probs, v).reshape(B, T, self.num_query_heads * self.head_dimension)
-
+        attn_probs, attn_output = scaled_dot_product_attention(q, k, v, self.head_dimension, mask)
+        
         # Merge heads
-        out = self.o_proj(attn_output)
+        out = attn_output.permute(0, 3, 1, 2, 4).reshape(B, T, self.head_dimension * self.num_groups * self.num_queries_per_group)
+        out = self.o_proj(out)
 
         self.metadata_storage = {
             "attention_probabilities" : attn_probs.reshape(B, self.num_groups * self.num_queries_per_group, T, T)
@@ -75,3 +64,6 @@ class GroupedQueryAttention(nn.Module):
     
     def metadata(self):
         return self.metadata_storage
+    
+    def reset(self):
+        pass 

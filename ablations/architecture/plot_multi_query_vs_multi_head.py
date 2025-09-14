@@ -20,7 +20,7 @@ def benchmark_attention(attn_cls, config_list, B=8, T=128, E=1024, head_dim=64, 
             if attn_cls == MultiQueryAttention:
                 attn = attn_cls(num_query_heads=config, embedding_dimension=E, head_dimension=head_dim).to(device)
             else:  # MHA
-                attn = attn_cls(num_heads=config, embedding_dimension=E, head_dimension=head_dim).to(device)
+                attn = attn_cls(num_kv_heads=config, embedding_dimension=E, head_dimension=head_dim).to(device)
         
         x = torch.randn(B, T, E, device=device)
         

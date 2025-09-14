@@ -2,7 +2,7 @@
 
 # Define model args
 MODEL_ARGS=(
-  --model_config configs/models/tiny-moe-64-emb-8-decoder-8192-4-1-gqa.yaml
+  --model_config configs/models/tiny-moe-64-emb-8-decoder-16384-4-1-gqa.yaml
 )
 
 # Define data

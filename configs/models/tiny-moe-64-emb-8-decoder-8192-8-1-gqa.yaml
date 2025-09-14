@@ -1,0 +1,21 @@
+parameters:
+  name: moe-basic-1m-64-emb-1L
+  type: moe
+  configuration:
+    model:
+      decoder_layers: 8
+    decoder:
+      input_dimension: 64
+      output_dimension: 64
+      hidden_dimension: 64
+      experts: 8
+      norm_eps: 1.0e-05
+      attention:
+        type: "grouped-query"
+        num_query_heads: 8
+        num_kv_heads: 1
+        embedding_dimension: 64
+        head_dimension: 32
+
+language_model:
+  vocab_size: 8192

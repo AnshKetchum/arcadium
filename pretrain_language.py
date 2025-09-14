@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import os
 import time
 import wandb
+import math
 from models.loader import load_language_model, load_dataset, load_tokenizer
 from models.tasks.language.datasets.sequence_length import SequenceLengthSampler
 from utils import load_config
@@ -26,6 +27,10 @@ def loss_function(logits, labels):
     logits = logits.view(B * T, V)   # [B*T, V]
     labels = labels.view(B * T)      # [B*T]
     return F.cross_entropy(logits, labels)
+
+def calculate_perplexity(loss):
+    """Calculate perplexity from cross-entropy loss"""
+    return math.exp(loss)
 
 def training_step(net: nn.Module, batch: torch.Tensor, labels: torch.Tensor):
     logits = net(batch)
@@ -86,9 +91,13 @@ def run_validation(
                 param_mem = batch_mem = labels_mem = total_activation_mem = allocated_mem = peak_mem = 0.0
                 rem_vram_alloc = rem_vram_peak = 0.0
 
+            # Calculate validation perplexity
+            val_perplexity = calculate_perplexity(loss.item())
+
             # Log to wandb (per val step)
             wandb.log({
                 "val_loss": loss.item(),
+                "val_perplexity": val_perplexity,
                 "val_params_VRAM_MB": param_mem,
                 "val_batch_VRAM_MB": batch_mem,
                 "val_labels_VRAM_MB": labels_mem,
@@ -108,7 +117,8 @@ def run_validation(
         h.remove()
 
     avg_val_loss = val_loss_total / max(1, n_batches)
-    return avg_val_loss
+    avg_val_perplexity = calculate_perplexity(avg_val_loss)
+    return avg_val_loss, avg_val_perplexity
 
 
 def pretrain(
@@ -123,6 +133,7 @@ def pretrain(
     experiment_name=None,
     model_name: str = None,
     ckpt: str = None,
+    profile_steps: int = 0,
 ):
     net = net.to(device)
     net.train()
@@ -136,19 +147,53 @@ def pretrain(
     os.makedirs(metrics_dir, exist_ok=True)
     os.makedirs(memory_layout_dir, exist_ok=True)
 
+    # --- Profile setup ---
+    profiler = None
+    if profile_steps > 0:
+        profile_dir = os.path.join(ckpt, "profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=1,
+                warmup=1,
+                active=profile_steps,
+                repeat=1
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        )
+        profiler.start()
+        print(f"Profiler started for {profile_steps} steps. Results will be saved to {profile_dir}")
+
     # --- Activation hook setup ---
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
     cumulative_tokens = 0
 
+    # Local logging file for perplexity
+    perplexity_log_path = os.path.join(metrics_dir, f"{model_name}-perplexity.txt")
+    
+    with open(perplexity_log_path, "w") as perp_log:
+        perp_log.write("Iteration\tTrain_Loss\tTrain_Perplexity\tVal_Loss\tVal_Perplexity\n")
+
     for i in range(num_iters):
         optim.zero_grad()
 
+        # --- Measure batch loading time ---
+        batch_start_time = time.time()
         try:
             batch, labels = next(data_iterator)
         except StopIteration:
             print(f"Stopped at {i + 1} training iterations.")
             break
+        batch_load_time = time.time() - batch_start_time
 
         batch_mem = batch.numel() * batch.element_size() / (1024**2)
         labels_mem = labels.numel() * labels.element_size() / (1024**2)
@@ -191,6 +236,8 @@ def pretrain(
         elapsed = forward_time + backward_time + optimizer_time
         iters_per_sec = 1.0 / elapsed if elapsed > 0 else 0.0
 
+        # --- Calculate training perplexity ---
+        train_perplexity = calculate_perplexity(loss.item())
 
         # --- Compute activation memory from hooks ---
         total_activation_mem = sum(activation_stats.values())  # MB
@@ -228,11 +275,16 @@ def pretrain(
         wandb.log(
             {
                 "lm_loss": loss.item(),
-                "iter_time" : elapsed,
+                "train_perplexity": train_perplexity,
+                "iter_time": elapsed,
+                "batch_load_time": batch_load_time,
+                "forward_time": forward_time,
+                "backward_time": backward_time,
+                "optimizer_time": optimizer_time,
                 "iters_per_sec": iters_per_sec,
                 "cumulative_tokens": cumulative_tokens,
                 "params_VRAM_MB": param_mem,
-                "train_sequence_length" : batch.shape[1],
+                "train_sequence_length": batch.shape[1],
                 "optimizer_state_VRAM_MB": opt_mem,
                 "batch_VRAM_MB": batch_mem,
                 "labels_VRAM_MB": labels_mem,
@@ -251,11 +303,15 @@ def pretrain(
             step=i,
         )
 
-        
+        # --- Profiler step ---
+        if profiler is not None:
+            profiler.step()
+
         # --- Checkpoint + JSON dump ---
         if i % checkpoint_frequency == 0 or i == num_iters - 1:
             print(
-                f"[iter {i}] Loss {loss.item():.4f}, iters/sec {iters_per_sec:.2f}, "
+                f"[iter {i}] Loss {loss.item():.4f}, PPL {train_perplexity:.2f}, "
+                f"iters/sec {iters_per_sec:.2f}, batch_load_time {batch_load_time:.4f}s, "
                 f"Tokens {cumulative_tokens}, "
                 f"Params {param_mem:.1f}MB, Opt {opt_mem:.1f}MB, Batch {batch_mem:.1f}MB, "
                 f"Acts {total_activation_mem:.1f}MB, VRAM {allocated_mem:.1f}MB (peak {peak_mem:.1f}MB), "
@@ -272,6 +328,7 @@ def pretrain(
                     "model_state_dict": net.state_dict(),
                     "optimizer_state_dict": optim.state_dict(),
                     "loss": loss.item(),
+                    "perplexity": train_perplexity,
                 },
                 checkpoint_path,
             )
@@ -292,28 +349,51 @@ def pretrain(
             plot_visualizations(net, vis_folder, i)
 
             # Validation
-            avg_val_loss = run_validation(net, val_dataloader, device, max_steps=num_val_iters, step=i)
-            print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}")
+            avg_val_loss, avg_val_perplexity = run_validation(
+                net, val_dataloader, device, max_steps=num_val_iters, step=i
+            )
+            print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}, PPL: {avg_val_perplexity:.2f}")
 
+            # Log validation perplexity to wandb
+            wandb.log({
+                "val_loss_avg": avg_val_loss,
+                "val_perplexity_avg": avg_val_perplexity,
+            }, step=i)
+
+            # Save metrics
             metrics = {
                 "iter": i,
                 "loss": loss.item(),
+                "perplexity": train_perplexity,
                 "trained_tokens": cumulative_tokens,
                 "param_count": param_count,
                 "estimated_flops": est_flops,
-                "val_loss" : avg_val_loss
+                "val_loss": avg_val_loss,
+                "val_perplexity": avg_val_perplexity,
+                "batch_load_time": batch_load_time,
+                "wandb_url": wandb.run.url or "",   
+                "wandb_id": wandb.run.id or ""
             }
             metrics_path = os.path.join(metrics_dir, f"{model_name}-metrics-iter{i}.json")
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f, indent=2)
             print(f"[iter {i}] Saved training metrics JSON to {metrics_path}")
 
-        activation_stats.clear()
-        # training_seqlen.next_seqlen()
+            # Log perplexity locally
+            with open(perplexity_log_path, "a") as perp_log:
+                perp_log.write(f"{i}\t{loss.item():.6f}\t{train_perplexity:.6f}\t{avg_val_loss:.6f}\t{avg_val_perplexity:.6f}\n")
 
+        activation_stats.clear()
+
+    # --- Cleanup ---
     # Cleanup hooks
     for h in hooks:
         h.remove()
+
+    # Stop profiler if it was running
+    if profiler is not None:
+        profiler.stop()
+        print(f"Profiling completed. Results saved to {os.path.join(ckpt, 'profile')}")
 
 
 def main():
@@ -325,7 +405,9 @@ def main():
     parser.add_argument("--training_config", type=str, default="configs/training/basic.yaml",
                         help="Path to training config YAML")
     parser.add_argument("--tokenizer_path", type=str, default="tokenizer.pkl",
-                        help="Path to training config YAML")
+                        help="Path to tokenizer file")
+    parser.add_argument("--profile", type=int, default=0,
+                        help="Number of training iterations to profile (0 to disable)")
 
     args = parser.parse_args()
 
@@ -333,6 +415,7 @@ def main():
     model_config = args.model_config
     training_config = args.training_config
     tokenizer_path = args.tokenizer_path
+    profile_steps = args.profile
 
     # Training configuration
     conf = load_config(training_config, "parameters")
@@ -359,7 +442,6 @@ def main():
 
     print(f"Configs copied to checkpoint folder: {ckpt}")
 
-
     # Load tokenizer
     tokenizer = load_tokenizer(tokenizer_path)
 
@@ -371,7 +453,6 @@ def main():
 
     # Verify that the tokenizer is valid for the model (i.e that the model's vocab size is at least the value you see there)
     assert net.vocab_size >= tokenizer.size(), f"Model vocab size of {net.vocab_size} is too low for tokenizer size of {tokenizer.size()}"
-
 
     # Model summary
     x = torch.zeros((1, conf["sequence_length"]), dtype=torch.long).to(device)
@@ -398,7 +479,7 @@ def main():
         sampler=seqlen_sampler
     )
 
-    # Train Dataset + dataloader
+    # Validation Dataset + dataloader
     val_sequence_length = conf["validation_sequence_length"]
     val_dataset = load_dataset(validation_data_config, tokenizer, val_sequence_length, net.get_output_dimension(), debug=False)
     val_dataloader = DataLoader(
@@ -407,7 +488,6 @@ def main():
         shuffle=True,
         num_workers=conf["num_workers"],
     )
-
 
     # Optimizer
     optim = Adam(net.parameters(), lr=conf["lr"])
@@ -421,6 +501,7 @@ def main():
             "lr": conf["lr"],
             "num_epochs": conf["epochs"],
             "model": name,
+            "profile_steps": profile_steps,
         },
     )
     wandb.watch(net, log="all", log_freq=100)
@@ -437,7 +518,8 @@ def main():
         conf["checkpoint_frequency"],
         conf["experiment_name"],
         name,
-        ckpt
+        ckpt,
+        profile_steps
     )
 
 

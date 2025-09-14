@@ -31,6 +31,7 @@ if __name__ == '__main__':
     
     for fldr in data_config.get("folders", []):
         for fl in os.listdir(fldr):
+            print("Reading", fl)
             ingest_file(os.path.join(fldr, fl), tok)
 
 

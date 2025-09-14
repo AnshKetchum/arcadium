@@ -1,3 +1,4 @@
 parameters:
   folders: 
     - data/starter-medium/processed
+    - data/shakespeare/processed
