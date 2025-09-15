@@ -20,7 +20,7 @@ class SequenceLengthScheduler:
         debug: bool = False,
         name: str = "scheduler",
     ):
-        assert end > start, f"End value {end} must be greater than start {start}"
+        assert end >= start, f"End value {end} must be greater than start {start}"
 
         self.start = start
         self.end = end

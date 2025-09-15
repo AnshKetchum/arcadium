@@ -11,15 +11,39 @@ import wandb
 import math
 from models.loader import load_language_model, load_dataset, load_tokenizer
 from models.tasks.language.datasets.sequence_length import SequenceLengthSampler
+from models.tasks.language.optimizers.loader import load_optimizer
 from utils import load_config
 from dotenv import load_dotenv 
 from torchinfo import summary
 from torch.utils.data import DataLoader
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
 from hooks import register_activation_hooks
 from visualize_transformer import plot_visualizations
 
 load_dotenv()
+
+def cosine_warmup_lr_lambda(step: int, warmup_steps: int, total_steps: int, min_lr_ratio: float = 0.1):
+    """
+    Cosine annealing with warmup learning rate schedule.
+    
+    Args:
+        step: Current training step
+        warmup_steps: Number of warmup steps
+        total_steps: Total number of training steps
+        min_lr_ratio: Minimum LR as a ratio of max LR (default 0.1)
+    
+    Returns:
+        Learning rate multiplier
+    """
+    if step < warmup_steps:
+        # Linear warmup
+        return step / warmup_steps
+    else:
+        # Cosine annealing
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
 
 def loss_function(logits, labels):
     # logits: [B, T, V], labels: [B, T]
@@ -126,6 +150,7 @@ def pretrain(
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
     optim: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: torch.device,
     num_iters=10,
     num_val_iters=10,
@@ -181,7 +206,7 @@ def pretrain(
     perplexity_log_path = os.path.join(metrics_dir, f"{model_name}-perplexity.txt")
     
     with open(perplexity_log_path, "w") as perp_log:
-        perp_log.write("Iteration\tTrain_Loss\tTrain_Perplexity\tVal_Loss\tVal_Perplexity\n")
+        perp_log.write("Iteration\tTrain_Loss\tTrain_Perplexity\tVal_Loss\tVal_Perplexity\tLearning_Rate\n")
 
     for i in range(num_iters):
         optim.zero_grad()
@@ -226,6 +251,7 @@ def pretrain(
             torch.cuda.reset_peak_memory_stats(device)
         t4 = time.time()
         optim.step()
+        scheduler.step()  # Update learning rate
         t5 = time.time()
         if torch.cuda.is_available():
             optimizer_allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
@@ -271,11 +297,15 @@ def pretrain(
         # Update token counter
         cumulative_tokens += labels.numel()
 
+        # Get current learning rate
+        current_lr = scheduler.get_last_lr()[0]
+
         # --- Log metrics to wandb ---
         wandb.log(
             {
                 "lm_loss": loss.item(),
                 "train_perplexity": train_perplexity,
+                "learning_rate": current_lr,
                 "iter_time": elapsed,
                 "batch_load_time": batch_load_time,
                 "forward_time": forward_time,
@@ -310,7 +340,7 @@ def pretrain(
         # --- Checkpoint + JSON dump ---
         if i % checkpoint_frequency == 0 or i == num_iters - 1:
             print(
-                f"[iter {i}] Loss {loss.item():.4f}, PPL {train_perplexity:.2f}, "
+                f"[iter {i}] Loss {loss.item():.4f}, PPL {train_perplexity:.2f}, LR {current_lr:.2e}, "
                 f"iters/sec {iters_per_sec:.2f}, batch_load_time {batch_load_time:.4f}s, "
                 f"Tokens {cumulative_tokens}, "
                 f"Params {param_mem:.1f}MB, Opt {opt_mem:.1f}MB, Batch {batch_mem:.1f}MB, "
@@ -327,8 +357,10 @@ def pretrain(
                     "iter": i,
                     "model_state_dict": net.state_dict(),
                     "optimizer_state_dict": optim.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "loss": loss.item(),
                     "perplexity": train_perplexity,
+                    "learning_rate": current_lr,
                 },
                 checkpoint_path,
             )
@@ -365,6 +397,7 @@ def pretrain(
                 "iter": i,
                 "loss": loss.item(),
                 "perplexity": train_perplexity,
+                "learning_rate": current_lr,
                 "trained_tokens": cumulative_tokens,
                 "param_count": param_count,
                 "estimated_flops": est_flops,
@@ -381,7 +414,7 @@ def pretrain(
 
             # Log perplexity locally
             with open(perplexity_log_path, "a") as perp_log:
-                perp_log.write(f"{i}\t{loss.item():.6f}\t{train_perplexity:.6f}\t{avg_val_loss:.6f}\t{avg_val_perplexity:.6f}\n")
+                perp_log.write(f"{i}\t{loss.item():.6f}\t{train_perplexity:.6f}\t{avg_val_loss:.6f}\t{avg_val_perplexity:.6f}\t{current_lr:.2e}\n")
 
         activation_stats.clear()
 
@@ -413,7 +446,6 @@ def main():
         action="store_true",
         help="Enable verbose outputs"
     )
-
 
     args = parser.parse_args()
 
@@ -495,7 +527,22 @@ def main():
     )
 
     # Optimizer
-    optim = Adam(net.parameters(), lr=conf["lr"])
+    optim = load_optimizer(net, **conf["optimizer"])#Adam(net.parameters(), lr=conf["lr"])
+
+    # Learning Rate Scheduler
+    warmup_steps = conf.get("warmup_steps", min(2000, conf["epochs"] // 20))  # Default to 2000 steps or 5% of total
+    min_lr_ratio = conf.get("min_lr_ratio", 0.01)  # Minimum LR as ratio of max LR
+
+    
+    lr_lambda = lambda step: cosine_warmup_lr_lambda(
+        step, warmup_steps, conf["epochs"], min_lr_ratio
+    )
+    scheduler = LambdaLR(optim, lr_lambda)
+    
+    print(f"Learning rate scheduler: Cosine with warmup")
+    print(f"  Warmup steps: {warmup_steps}")
+    print(f"  Total steps: {conf['epochs']}")
+    print(f"  Min LR ratio: {min_lr_ratio}")
 
     # WandB init
     wandb.init(
@@ -507,6 +554,9 @@ def main():
             "num_epochs": conf["epochs"],
             "model": name,
             "profile_steps": profile_steps,
+            "warmup_steps": warmup_steps,
+            "min_lr_ratio": min_lr_ratio,
+            "scheduler": "cosine_warmup",
         },
     )
     wandb.watch(net, log="all", log_freq=100)
@@ -517,6 +567,7 @@ def main():
         train_dataloader,
         val_dataloader,
         optim,
+        scheduler,
         device,
         conf["epochs"],
         conf["val_steps"],
