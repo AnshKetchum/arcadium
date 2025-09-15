@@ -1,6 +1,6 @@
 import os
 from transformers import AutoTokenizer
-from models.tasks.language.tokenizers.base import BaseTokenizer
+from models.tasks.language.tokenizer.base import BaseTokenizer
 
 class HuggingFaceTokenizer(BaseTokenizer):
     def __init__(self, model_name: str = "gpt2"):

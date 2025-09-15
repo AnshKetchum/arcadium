@@ -1,0 +1,4 @@
+parameters:
+  type: "fineweb"
+  folders: 
+    - data/fineweb10B

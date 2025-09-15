@@ -1,6 +1,6 @@
 parameters:
   experiment_name: "moe-language-modeling-tiny"
-  epochs: 1000
+  epochs: 2500
   val_steps: 10
   checkpoint_frequency: 100
   batch_size: 4

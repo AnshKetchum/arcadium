@@ -1,0 +1,4 @@
+parameters:
+  type: "local"
+  folders: 
+    - data/starter-small/processed/basic

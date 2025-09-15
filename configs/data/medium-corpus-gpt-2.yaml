@@ -1,0 +1,5 @@
+parameters:
+  type: "local"
+  folders: 
+    - data/starter-medium/processed/gpt-2
+    - data/shakespeare/processed/gpt-2

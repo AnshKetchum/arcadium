@@ -29,5 +29,7 @@ build
 generated_configs
 
 # Data 
-data
+fineweb10B
+starter-medium
+starter-small
 tokenizers/

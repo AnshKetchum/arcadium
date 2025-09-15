@@ -1,0 +1,5 @@
+parameters:
+  type: "local"
+  folders: 
+    - data/starter-medium/processed/basic
+    - data/shakespeare/processed/basic
