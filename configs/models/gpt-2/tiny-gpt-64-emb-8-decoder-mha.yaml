@@ -14,6 +14,6 @@ parameters:
         num_query_heads: 8
         num_kv_heads: 8
         embedding_dimension: 512
-        head_dimension: 64
+        head_dimension: 512
   tokenizer:
     config: configs/tokenizer/gpt-2.yaml
