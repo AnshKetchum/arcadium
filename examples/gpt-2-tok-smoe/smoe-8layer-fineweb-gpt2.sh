@@ -16,5 +16,4 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 # Run training with both sets of args
 python pretrain_language.py \
   "${MODEL_ARGS[@]}" \
-  --verbose \
   "${DATA_ARGS[@]}" | tee "logs/out_${TIMESTAMP}.log"
