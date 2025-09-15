@@ -14,8 +14,8 @@ from models.tasks.language.backbones.dense import DenseTransformer
 
 
 from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.tokenizers.base import BaseTokenizer, BasicTokenizer
-from models.tasks.language.tokenizers.huggingface import HuggingFaceTokenizer
+from models.tasks.language.tokenizer.base import BaseTokenizer, BasicTokenizer
+from models.tasks.language.tokenizer.huggingface import HuggingFaceTokenizer
 
 # Datasets
 from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
