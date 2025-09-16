@@ -9,6 +9,8 @@ import os
 import time
 import wandb
 import math
+import glob
+import re
 from models.loader import load_language_model, load_dataset, load_tokenizer
 from models.tasks.language.datasets.sequence_length import SequenceLengthSampler
 from models.tasks.language.optimizers.loader import load_optimizer
@@ -44,6 +46,64 @@ def cosine_warmup_lr_lambda(step: int, warmup_steps: int, total_steps: int, min_
         progress = (step - warmup_steps) / (total_steps - warmup_steps)
         cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return min_lr_ratio + (1 - min_lr_ratio) * cosine_decay
+
+def find_latest_checkpoint(checkpoint_dir: str, model_name: str):
+    """
+    Find the latest checkpoint file in the weights directory.
+    
+    Args:
+        checkpoint_dir: Path to the checkpoint directory
+        model_name: Name of the model
+    
+    Returns:
+        Tuple of (checkpoint_path, iteration_number) or (None, 0) if no checkpoint found
+    """
+    weights_dir = os.path.join(checkpoint_dir, "weights")
+    if not os.path.exists(weights_dir):
+        return None, 0
+    
+    # Look for checkpoint files with pattern: {model_name}-iter{number}.pt
+    pattern = os.path.join(weights_dir, f"{model_name}-iter*.pt")
+    checkpoint_files = glob.glob(pattern)
+    
+    if not checkpoint_files:
+        return None, 0
+    
+    # Extract iteration numbers and find the latest
+    latest_iter = -1
+    latest_checkpoint = None
+    
+    for checkpoint_file in checkpoint_files:
+        # Extract iteration number from filename
+        match = re.search(rf"{re.escape(model_name)}-iter(\d+)\.pt", os.path.basename(checkpoint_file))
+        if match:
+            iter_num = int(match.group(1))
+            if iter_num > latest_iter:
+                latest_iter = iter_num
+                latest_checkpoint = checkpoint_file
+    
+    return latest_checkpoint, latest_iter
+
+def load_checkpoint(checkpoint_path: str, net: nn.Module, optim: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.LRScheduler):
+    """
+    Load model, optimizer, and scheduler state from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        net: Model to load weights into
+        optim: Optimizer to load state into
+        scheduler: Scheduler to load state into
+    
+    Returns:
+        Dictionary containing checkpoint info
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    net.load_state_dict(checkpoint['model_state_dict'])
+    optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    return checkpoint
 
 def loss_function(logits, labels):
     # logits: [B, T, V], labels: [B, T]
@@ -159,6 +219,8 @@ def pretrain(
     model_name: str = None,
     ckpt: str = None,
     profile_steps: int = 0,
+    start_iter: int = 0,
+    cumulative_tokens_start: int = 0,
 ):
     net = net.to(device)
     net.train()
@@ -200,15 +262,17 @@ def pretrain(
     # --- Activation hook setup ---
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
-    cumulative_tokens = 0
+    cumulative_tokens = cumulative_tokens_start
 
     # Local logging file for perplexity
     perplexity_log_path = os.path.join(metrics_dir, f"{model_name}-perplexity.txt")
     
-    with open(perplexity_log_path, "w") as perp_log:
-        perp_log.write("Iteration\tTrain_Loss\tTrain_Perplexity\tVal_Loss\tVal_Perplexity\tLearning_Rate\n")
+    # Create or append to perplexity log
+    if start_iter == 0:
+        with open(perplexity_log_path, "w") as perp_log:
+            perp_log.write("Iteration\tTrain_Loss\tTrain_Perplexity\tVal_Loss\tVal_Perplexity\tLearning_Rate\n")
 
-    for i in range(num_iters):
+    for i in range(start_iter, num_iters):
         optim.zero_grad()
 
         # --- Measure batch loading time ---
@@ -361,6 +425,7 @@ def pretrain(
                     "loss": loss.item(),
                     "perplexity": train_perplexity,
                     "learning_rate": current_lr,
+                    "cumulative_tokens": cumulative_tokens,
                 },
                 checkpoint_path,
             )
@@ -441,6 +506,8 @@ def main():
                         help="Path to tokenizer file")
     parser.add_argument("--profile", type=int, default=0,
                         help="Number of training iterations to profile (0 to disable)")
+    parser.add_argument("--load", type=str, default=None,
+                        help="Path to checkpoint directory to resume training from")
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -455,6 +522,7 @@ def main():
     tokenizer_path = args.tokenizer_path
     profile_steps = args.profile
     debug = args.verbose
+    load_checkpoint_dir = args.load
 
     # Training configuration
     conf = load_config(training_config, "parameters")
@@ -468,18 +536,25 @@ def main():
     assert os.path.exists(model_config), f"Model config not found: {model_config}"
     assert os.path.exists(training_config), f"Training config not found: {training_config}"
 
-    # ---- Create checkpoint folder here ----
-    checkpoint_folder_name = f"{conf['experiment_name']}-run-{time.strftime('%Y-%m-%d-%H-%M-%S')}".strip().replace(" ", "-")
-    ckpt = os.path.join("checkpoints", checkpoint_folder_name)
-    os.makedirs(ckpt, exist_ok=True)
+    # ---- Create or use checkpoint folder ----
+    if load_checkpoint_dir is not None:
+        # Resuming from existing checkpoint
+        assert os.path.exists(load_checkpoint_dir), f"Checkpoint directory not found: {load_checkpoint_dir}"
+        ckpt = load_checkpoint_dir
+        print(f"Resuming training from checkpoint directory: {ckpt}")
+    else:
+        # Creating new checkpoint folder
+        checkpoint_folder_name = f"{conf['experiment_name']}-run-{time.strftime('%Y-%m-%d-%H-%M-%S')}".strip().replace(" ", "-")
+        ckpt = os.path.join("checkpoints", checkpoint_folder_name)
+        os.makedirs(ckpt, exist_ok=True)
 
-    # ---- Copy configs into checkpoint folder ----
-    for cfg_path in [model_config, training_config, training_data_config, validation_data_config]:
-        shutil.copy(cfg_path, ckpt)
-    if tokenizer_path and os.path.exists(tokenizer_path):
-        shutil.copy(tokenizer_path, ckpt)
+        # ---- Copy configs into checkpoint folder ----
+        for cfg_path in [model_config, training_config, training_data_config, validation_data_config]:
+            shutil.copy(cfg_path, ckpt)
+        if tokenizer_path and os.path.exists(tokenizer_path):
+            shutil.copy(tokenizer_path, ckpt)
 
-    print(f"Configs copied to checkpoint folder: {ckpt}")
+        print(f"Configs copied to checkpoint folder: {ckpt}")
 
     # Hardware
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -544,9 +619,32 @@ def main():
     print(f"  Total steps: {conf['epochs']}")
     print(f"  Min LR ratio: {min_lr_ratio}")
 
+    # Initialize resume variables
+    start_iter = 0
+    cumulative_tokens_start = 0
+    resume_info = ""
+
+    # Load checkpoint if resuming
+    if load_checkpoint_dir is not None:
+        checkpoint_path, latest_iter = find_latest_checkpoint(ckpt, name)
+        if checkpoint_path is not None:
+            print(f"Found latest checkpoint: {checkpoint_path} at iteration {latest_iter}")
+            checkpoint_info = load_checkpoint(checkpoint_path, net, optim, scheduler)
+            start_iter = latest_iter + 1  # Resume from next iteration
+            cumulative_tokens_start = checkpoint_info.get('cumulative_tokens', 0)
+            resume_info = f" (resumed from iter {latest_iter})"
+            print(f"Successfully resumed training from iteration {latest_iter}")
+            print(f"  Previous loss: {checkpoint_info['loss']:.4f}")
+            print(f"  Previous perplexity: {checkpoint_info['perplexity']:.2f}")
+            print(f"  Previous learning rate: {checkpoint_info['learning_rate']:.2e}")
+            print(f"  Cumulative tokens processed: {cumulative_tokens_start}")
+        else:
+            print(f"No checkpoint found in {ckpt}, starting from scratch")
+
     # WandB init
     wandb.init(
         project=conf["experiment_name"],
+        name=f"{conf['experiment_name']}{resume_info}",
         config={
             "batch_size": conf["batch_size"],
             "sequence_length": conf["sequence_length"],
@@ -557,6 +655,8 @@ def main():
             "warmup_steps": warmup_steps,
             "min_lr_ratio": min_lr_ratio,
             "scheduler": "cosine_warmup",
+            "resumed": load_checkpoint_dir is not None,
+            "start_iter": start_iter,
         },
     )
     wandb.watch(net, log="all", log_freq=100)
@@ -575,7 +675,9 @@ def main():
         conf["experiment_name"],
         name,
         ckpt,
-        profile_steps
+        profile_steps,
+        start_iter,
+        cumulative_tokens_start
     )
 
 
