@@ -1,6 +1,6 @@
 parameters:
   experiment_name: "nano-gpt-speedrun"
-  epochs: 10000
+  epochs: 50000
   val_steps: 10
   checkpoint_frequency: 100  # keeping as requested
   batch_size: 32              # increased from 8
@@ -8,7 +8,7 @@ parameters:
   sequence_length: 1024       # increased from 32
   lr: 0.001                  # decreased from 0.001
   optimizer:
-    name: "muon+adam"
+    name: "adam"
     lr: 0.001                  # decreased from 0.001
   training_sequence_length:
     start: 1024               # fixed length, no curriculum
