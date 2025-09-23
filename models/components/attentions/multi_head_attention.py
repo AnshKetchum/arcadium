@@ -36,7 +36,6 @@ class MultiHeadAttention(nn.Module):
         # Try to pull from kv cache
         k, v = None, None
         if kwargs.get("use_kv_cache", False):
-            print("PULLING FROM KV CACHE")
             k_prev, v_prev = self.kv_cache.get(
                 0,
                 B, 
@@ -56,8 +55,6 @@ class MultiHeadAttention(nn.Module):
                 v = torch.cat([v_prev, v_cur], dim=1)
             
                 self.kv_cache.cache(k_cur, v_cur, 0,B, T, T + 1, 0, self.num_heads)
-
-                k_ret = self.k_proj(x)
 
             else: 
                 k = self.k_proj(x).reshape(B, T, self.num_heads, self.head_dimension).permute(0, 2, 1, 3)
