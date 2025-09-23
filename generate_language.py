@@ -6,7 +6,7 @@ import json
 import os 
 from dotenv import load_dotenv 
 from models.loader import load_language_model, load_tokenizer
-from models.tasks.language.tokenizers.base import BasicTokenizer
+from models.tasks.language.tokenizer.base import BasicTokenizer
 from models.tasks.language.architecture import LanguageModel
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -30,6 +30,7 @@ def generate(
     checkpoint_path: str = "",
     tokenizer_path: str = "",
     profile_steps: int = 0,
+    use_kv_cache: bool = False
 ):
     net.eval()
 
@@ -57,6 +58,10 @@ def generate(
     time_to_first_token = None
     prev_time = time.time()
 
+    metadata = {
+        "use_kv_cache" : use_kv_cache
+    }
+
     with torch.no_grad():
         if profiler_ctx:
             profiler_ctx.__enter__()
@@ -71,9 +76,9 @@ def generate(
 
             if profiler_ctx:
                 with record_function("logits_generation"):
-                    logits = net(input_tensor)
+                    logits = net(input_tensor, **metadata)
             else:
-                logits = net(input_tensor)
+                logits = net(input_tensor, **metadata)
 
             next_token_id = sample_highest_prob(logits)
 
@@ -142,6 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, help="Hardware device to generate on", default="cuda")
     parser.add_argument("--seed", type=int, help="Seed for reproducibility", default=1)
     parser.add_argument("--generation_folder", type=str, help="Folder to save generations", default="generations")
+    parser.add_argument("--use_kv_cache", action="store_true", dest="kv_cache")
 
     # New profiling args
     parser.add_argument("--profile", type=int, default=0,
@@ -158,6 +164,7 @@ if __name__ == "__main__":
     seed = args.seed
     generation_folder = args.generation_folder
     profile_steps = args.profile
+    use_kv_cache = args.kv_cache
 
     os.makedirs(generation_folder, exist_ok=True)
 
@@ -183,7 +190,8 @@ if __name__ == "__main__":
         generation_folder,
         checkpoint_path,
         tokenizer_path,
-        profile_steps
+        profile_steps,
+        use_kv_cache
     )
 
     print("Output text", result)

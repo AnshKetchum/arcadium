@@ -25,12 +25,14 @@ class GroupedQueryAttention(nn.Module):
         self.positional_embedding = SinusoidalPositionalEmbedding(self.head_dimension)
         self.metadata_storage = {}
 
-    def forward(self, x, attention_mask = None):
+
+    def forward(self, x, attention_mask = None, **kwargs):
         B, T, E = x.shape
         assert E == self.embedding_dimension
 
         # Project QKV
         q = self.q_proj(x).reshape(B, T, self.num_groups, self.num_queries_per_group, self.head_dimension) # [B, T, G, Q, D]
+
         kv = self.kv_proj(x).reshape(B, T, self.num_groups, 1 , 2 * self.head_dimension) # [B, T, G, 1, D]
         k, v = kv.chunk(2, dim = -1) # [B, T, G, 1, D]
 

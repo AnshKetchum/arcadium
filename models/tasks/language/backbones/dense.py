@@ -32,8 +32,8 @@ class Decoder(nn.Module):
     self.post_attn_norm = nn.RMSNorm(self.input_dimension, eps = decoder_config.norm_eps, elementwise_affine=True)
     self.ffn = FFN(decoder_config.input_dimension, decoder_config.output_dimension, hidden_dimension = decoder_config.hidden_dimension)
 
-  def forward(self, x: torch.Tensor):
-    attn = self.attn(self.pre_norm(x))
+  def forward(self, x: torch.Tensor, **kwargs):
+    attn = self.attn(self.pre_norm(x), **kwargs)
     post_norm_sum = attn + x
     post_norm = self.post_attn_norm(post_norm_sum)
     ffn_output = self.ffn(post_norm)
@@ -55,11 +55,11 @@ class DenseTransformer(nn.Module):
     self.final_norm = nn.RMSNorm(config.decoder.input_dimension, eps = config.decoder.norm_eps, elementwise_affine=True)
     self.ffn = nn.Linear(config.decoder.input_dimension, config.decoder.output_dimension, bias = False)
 
-  def forward(self, x):
+  def forward(self, x, **kwargs):
     o = x
 
     for i, l in enumerate(self.decoder_layers):
-        o = l(o)
+        o = l(o, **kwargs)
 
     o = self.final_norm(o)
     o = self.ffn(o)
