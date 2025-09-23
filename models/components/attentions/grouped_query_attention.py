@@ -28,7 +28,24 @@ class GroupedQueryAttention(nn.Module):
         self.positional_embedding = SinusoidalPositionalEmbedding(self.head_dimension)
         self.metadata_storage = {}
 
-        self.kv_cache = load_kv_cache(kwargs.get("kv_cache", {}))
+        def key_value_compute_function(x: torch.Tensor):
+            B, T, _ = x.shape
+            k = self.k_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension).permute(0, 2, 3, 1, 4)
+            v = self.v_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension).permute(0, 2, 3, 1, 4)
+
+            k = self.positional_embedding(k)
+
+            return k, v
+        
+        self.key_value_compute_function = key_value_compute_function
+
+        kv_cache_config = kwargs.get("kv_cache", {})
+        kv_cache_config["num_key_heads"] = self.num_heads
+        kv_cache_config["num_value_heads"] = self.num_heads
+        kv_cache_config["key_dimension"] = self.head_dimension
+        kv_cache_config["value_dimension"] = self.head_dimension
+
+        self.kv_cache = load_kv_cache(kv_cache_config, recompute_function = self.key_value_compute_function)
 
     def forward(self, x, attention_mask=None, **kwargs):
         B, T, E = x.shape
@@ -37,48 +54,8 @@ class GroupedQueryAttention(nn.Module):
         # Project Q
         q = self.q_proj(x).reshape(B, T, self.num_groups, self.num_queries_per_group, self.head_dimension)  # [B, T, G, Q, D]
 
-        k, v = None, None
-        if kwargs.get("use_kv_cache", False):
-            k_prev, v_prev = self.kv_cache.get(
-                0,
-                B,
-                0,
-                T,
-                0,
-                self.num_groups
-            )
-
-            if k_prev is not None and v_prev is not None:
-                # Only compute KV for the last token
-                k_cur = self.k_proj(x[:, -1:, :]).reshape(B, 1, self.num_groups, 1, self.head_dimension)  # [B, 1, G, 1, H]
-                v_cur = self.v_proj(x[:, -1:, :]).reshape(B, 1, self.num_groups, 1, self.head_dimension)  # [B, 1, G, 1, H]
-
-                # Apply positional embedding to the new key (time dim is 1 here)
-                k_cur = self.positional_embedding(k_cur)
-
-                # Concatenate cached and new along time dimension (dim=1)
-                k = torch.cat([k_prev, k_cur], dim=1)  # [B, T_prev+1, G, 1, H]
-                v = torch.cat([v_prev, v_cur], dim=1)
-
-                # Update cache with the new token chunk
-                self.kv_cache.cache(k_cur, v_cur, 0, B, T, T + 1, 0, self.num_groups)
-
-            else:
-                # Compute full KV and cache
-                k = self.k_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension)  # [B, T, G, 1, H]
-                v = self.v_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension)  # [B, T, G, 1, H]
-
-                # Apply positional embedding on time dimension (T)
-                k = self.positional_embedding(k)
-
-                self.kv_cache.cache(k, v, 0, B, 0, T, 0, self.num_groups)
-
-        else:
-            # No cache path
-            k = self.k_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension)  # [B, T, G, 1, H]
-            v = self.v_proj(x).reshape(B, T, self.num_groups, 1, self.head_dimension)  # [B, T, G, 1, H]
-
-            k = self.positional_embedding(k)
+        # Try to pull from kv cache
+        k, v = self.kv_cache.get_or_recompute(x) if kwargs.get("use_kv_cache", False) else self.key_value_compute_function(x) 
 
         # Rearrange for attention:
         # q: [B, T, G, Q, D] -> [B, G, Q, T, D]

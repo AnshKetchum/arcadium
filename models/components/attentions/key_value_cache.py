@@ -16,7 +16,7 @@ class KVCache:
     """
         A hopefully simple interface 
     """
-    def __init__(self, config: KVCacheParams):
+    def __init__(self, config: KVCacheParams, **kwargs):
         self.max_batch_size = config.max_batch_size
         self.max_sequence_length = config.max_sequence_length
         self.key_dimension = config.key_dimension
@@ -26,6 +26,9 @@ class KVCache:
         self.enabled = config.enabled
         self.device = "cuda"
         self.empty = True
+
+        assert "recompute_function" in kwargs, "Args need to specify recompute function for attention"
+        self.recompute_function = kwargs.get("recompute_function")
 
         if self.enabled:
             self.key_cache = torch.zeros(self.max_batch_size, self.num_key_heads, self.max_sequence_length, self.key_dimension, device=self.device)
@@ -48,6 +51,30 @@ class KVCache:
             return k, v
         else:
             return None, None
+        
+    def get_or_recompute(self, x: torch.Tensor):
+        B, T, _ = x.shape
+
+        k, v = None, None
+        k_prev, v_prev = self.get(
+            0,
+            B, 
+            0, 
+            T,
+            0, self.num_key_heads
+        )
+
+        if k_prev is not None and v_prev is not None:
+            k_cur, v_cur = self.recompute_function(x[:, -1, :])
+            k = torch.cat([k_prev, k_cur], dim=1)
+            v = torch.cat([v_prev, v_cur], dim=1)
+            self.cache(k_cur, v_cur, 0,B, T, T + 1, 0, self.num_key_heads)
+            return k, v
+        else: 
+            k, v = self.recompute_function(x)
+            self.cache(k, v, 0,B, 0, T, 0, self.num_key_heads)
+            return k, v
+        
     
     def reset(self):
         if self.enabled:
@@ -55,7 +82,7 @@ class KVCache:
             self.value_cache = torch.zeros(self.max_batch_size, self.num_value_heads, self.max_sequence_length, self.value_dimension, device=self.device)
             self.empty = True
     
-def load_kv_cache(kv_cache_params: dict):
+def load_kv_cache(kv_cache_params: dict, **kwargs):
     params = KVCacheParams(**kv_cache_params)
-    kv_cache = KVCache(params)
+    kv_cache = KVCache(params, **kwargs)
     return kv_cache
