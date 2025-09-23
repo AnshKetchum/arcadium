@@ -95,3 +95,6 @@ class MultiHeadAttention(nn.Module):
     
     def metadata(self):
         return self.metadata_storage
+    
+    def reset(self):
+        self.kv_cache.reset()
