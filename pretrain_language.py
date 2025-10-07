@@ -22,6 +22,7 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from hooks import register_activation_hooks
 from visualize_transformer import plot_visualizations
+from generate_language import generate
 
 load_dotenv()
 
@@ -125,6 +126,7 @@ def run_validation(
     net: torch.nn.Module,
     val_dataloader: torch.utils.data.DataLoader,
     device: torch.device,
+    ckpt: str,
     max_steps: int = 10,
     step: int = 0,
 ):
@@ -133,7 +135,6 @@ def run_validation(
     n_batches = 0
     val_iterator = iter(val_dataloader)
 
-    # Setup activation hooks for validation
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
 
@@ -150,7 +151,7 @@ def run_validation(
 
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats(device)
-            logits, loss = training_step(net, batch=batch, labels=labels)  # same step but no backward
+            logits, loss = training_step(net, batch=batch, labels=labels)
             if torch.cuda.is_available():
                 forward_allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
                 forward_peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
@@ -160,25 +161,20 @@ def run_validation(
             val_loss_total += loss.item()
             n_batches += 1
 
-            # Compute activation memory
-            total_activation_mem = sum(activation_stats.values())  # MB
+            total_activation_mem = sum(activation_stats.values())
 
             if torch.cuda.is_available():
                 param_mem = sum(p.numel() * p.element_size() for p in net.parameters()) / (1024 ** 2)
                 allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
                 peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-                rem_vram_alloc = allocated_mem - (param_mem + batch_mem + labels_mem + total_activation_mem)
-                rem_vram_peak = peak_mem - (param_mem + batch_mem + labels_mem + total_activation_mem)
-                rem_vram_alloc = max(rem_vram_alloc, 0.0)
-                rem_vram_peak = max(rem_vram_peak, 0.0)
+                rem_vram_alloc = max(allocated_mem - (param_mem + batch_mem + labels_mem + total_activation_mem), 0.0)
+                rem_vram_peak = max(peak_mem - (param_mem + batch_mem + labels_mem + total_activation_mem), 0.0)
             else:
                 param_mem = batch_mem = labels_mem = total_activation_mem = allocated_mem = peak_mem = 0.0
                 rem_vram_alloc = rem_vram_peak = 0.0
 
-            # Calculate validation perplexity
             val_perplexity = calculate_perplexity(loss.item())
 
-            # Log to wandb (per val step)
             wandb.log({
                 "val_loss": loss.item(),
                 "val_perplexity": val_perplexity,
@@ -196,12 +192,61 @@ def run_validation(
 
             activation_stats.clear()
 
-    # Cleanup hooks
     for h in hooks:
         h.remove()
 
     avg_val_loss = val_loss_total / max(1, n_batches)
     avg_val_perplexity = calculate_perplexity(avg_val_loss)
+
+    try:
+        generation_dir = os.path.join(ckpt, "generations")
+        os.makedirs(generation_dir, exist_ok=True)
+
+        tokenizer = getattr(net, "tokenizer", None)
+        if tokenizer is not None:
+            net.eval()
+            val_iterator = iter(val_dataloader)
+            num_generations = 3
+            generations = []
+
+            for gen_idx in range(num_generations):
+                try:
+                    val_batch, _ = next(val_iterator)
+                except StopIteration:
+                    break
+
+                prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
+                prompt_text = tokenizer.decode(prompt_tokens)
+
+                output_text = generate(
+                    prompt_text,
+                    tokenizer,
+                    net,
+                    device,
+                    max_output_length=50,
+                    name=getattr(net, "model_name", "model"),
+                    generation_folder="",
+                    checkpoint_path=ckpt,
+                    tokenizer_path="",
+                    profile_steps=0,
+                    use_kv_cache=False,
+                )
+
+                generations.append({
+                    "iter": step,
+                    "generation_idx": gen_idx,
+                    "prompt": prompt_text,
+                    "output": output_text,
+                })
+
+                print(f"[val iter {step}] Generated sample {gen_idx}: {output_text[:100]}...")
+
+            gen_path = os.path.join(generation_dir, f"val_iter_{step}.json")
+            with open(gen_path, "w") as f:
+                json.dump(generations, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Generation failed during validation: {e}")
+
     return avg_val_loss, avg_val_perplexity
 
 
@@ -447,7 +492,7 @@ def pretrain(
 
             # Validation
             avg_val_loss, avg_val_perplexity = run_validation(
-                net, val_dataloader, device, max_steps=num_val_iters, step=i
+                net, val_dataloader, device, ckpt=ckpt, max_steps=num_val_iters, step=i
             )
             print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}, PPL: {avg_val_perplexity:.2f}")
 
