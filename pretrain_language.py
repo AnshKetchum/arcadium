@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 import time
+from tqdm import tqdm
 import wandb
 import math
 import glob
@@ -124,6 +125,7 @@ def training_step(net: nn.Module, batch: torch.Tensor, labels: torch.Tensor):
 
 def run_validation(
     net: torch.nn.Module,
+    tokenizer,
     val_dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     ckpt: str,
@@ -139,7 +141,7 @@ def run_validation(
     hooks = register_activation_hooks(net, activation_stats)
 
     with torch.no_grad():
-        for j in range(max_steps):
+        for j in tqdm(range(max_steps), desc="Running validation steps", total=max_steps):
             try:
                 batch, labels = next(val_iterator)
             except StopIteration:
@@ -198,60 +200,60 @@ def run_validation(
     avg_val_loss = val_loss_total / max(1, n_batches)
     avg_val_perplexity = calculate_perplexity(avg_val_loss)
 
-    try:
-        generation_dir = os.path.join(ckpt, "generations")
-        os.makedirs(generation_dir, exist_ok=True)
+    generation_dir = os.path.join(ckpt, "generations")
+    os.makedirs(generation_dir, exist_ok=True)
 
-        tokenizer = getattr(net, "tokenizer", None)
-        if tokenizer is not None:
-            net.eval()
-            val_iterator = iter(val_dataloader)
-            num_generations = 3
-            generations = []
+    print("Created generation directory at ", generation_dir)
 
-            for gen_idx in range(num_generations):
-                try:
-                    val_batch, _ = next(val_iterator)
-                except StopIteration:
-                    break
 
-                prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
-                prompt_text = tokenizer.decode(prompt_tokens)
+    num_generations = 3
+    generations = []
 
-                output_text = generate(
-                    prompt_text,
-                    tokenizer,
-                    net,
-                    device,
-                    max_output_length=50,
-                    name=getattr(net, "model_name", "model"),
-                    generation_folder="",
-                    checkpoint_path=ckpt,
-                    tokenizer_path="",
-                    profile_steps=0,
-                    use_kv_cache=False,
-                )
+    for gen_idx in range(num_generations):
+        try:
+            val_batch, _ = next(val_iterator)
+        except StopIteration:
+            break
 
-                generations.append({
-                    "iter": step,
-                    "generation_idx": gen_idx,
-                    "prompt": prompt_text,
-                    "output": output_text,
-                })
+        print("Retrieved next val batch for idx", gen_idx)
 
-                print(f"[val iter {step}] Generated sample {gen_idx}: {output_text[:100]}...")
+        prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
+        prompt_text = tokenizer.decode(prompt_tokens)
 
-            gen_path = os.path.join(generation_dir, f"val_iter_{step}.json")
-            with open(gen_path, "w") as f:
-                json.dump(generations, f, indent=2)
-    except Exception as e:
-        print(f"⚠️ Generation failed during validation: {e}")
+        output_text = generate(
+            prompt_text,
+            tokenizer,
+            net,
+            device,
+            max_output_length=50,
+            name=getattr(net, "model_name", "model"),
+            generation_folder="",
+            checkpoint_path=ckpt,
+            tokenizer_path="",
+            profile_steps=0,
+            use_kv_cache=False,
+        )
 
+        generations.append({
+            "iter": step,
+            "generation_idx": gen_idx,
+            "prompt": prompt_text,
+            "output": output_text,
+        })
+
+        print(f"[val iter {step}] Generated sample {gen_idx}: {output_text[:100]}...")
+
+    gen_path = os.path.join(generation_dir, f"val_iter_{step}.json")
+    with open(gen_path, "w") as f:
+        json.dump(generations, f, indent=2)
+
+    print("Validation run complete")
     return avg_val_loss, avg_val_perplexity
 
 
 def pretrain(
     net: torch.nn.Module,
+    tokenizer,
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
     optim: torch.optim.Optimizer,
@@ -492,7 +494,7 @@ def pretrain(
 
             # Validation
             avg_val_loss, avg_val_perplexity = run_validation(
-                net, val_dataloader, device, ckpt=ckpt, max_steps=num_val_iters, step=i
+                net, tokenizer,val_dataloader, device, ckpt=ckpt, max_steps=num_val_iters, step=i
             )
             print(f"[iter {i}] Validation avg loss: {avg_val_loss:.4f}, PPL: {avg_val_perplexity:.2f}")
 
@@ -709,6 +711,7 @@ def main():
     # Pretrain
     pretrain(
         net,
+        tokenizer,
         train_dataloader,
         val_dataloader,
         optim,

@@ -7,8 +7,6 @@ from models.components.embeddings.sinusoidal import SinusoidalPositionalEmbeddin
 from models.components.attentions.utils import get_default_causal_mask, scaled_dot_product_attention
 from models.components.attentions.key_value_cache import load_kv_cache
 
-
-
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_kv_heads=8, embedding_dimension=1024, head_dimension = 512, **kwargs):
         super().__init__()

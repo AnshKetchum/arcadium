@@ -9,8 +9,11 @@ class BaseTokenizer(ABC):
         pass 
     
     @abstractmethod
-    def decode_single(self, token_id: int):
+    def decode_single(self, token_id: int) -> str:
         pass
+
+    def decode(self, token_ids: list[int]) -> str:
+        return " ".join([self.decode_single(t) for t in token_ids])
 
     @abstractmethod
     def get_beginning_of_sequence_token(self) -> int:

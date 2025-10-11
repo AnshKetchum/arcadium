@@ -24,7 +24,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     def decode_single(self, token_id: int) -> str:
         return self.tokenizer.decode([token_id], clean_up_tokenization_spaces=True)
-
+    
     def get_beginning_of_sequence_token(self) -> int:
         if self.tokenizer.bos_token_id is not None:
             return self.tokenizer.bos_token_id

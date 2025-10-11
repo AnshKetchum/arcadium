@@ -9,7 +9,7 @@ from models.loader import load_language_model, load_tokenizer
 from models.tasks.language.tokenizer.base import BasicTokenizer
 from models.tasks.language.architecture import LanguageModel
 from torch.profiler import profile, record_function, ProfilerActivity
-
+from tqdm import tqdm
 from utils import load_config
 
 load_dotenv()
@@ -66,7 +66,7 @@ def generate(
         if profiler_ctx:
             profiler_ctx.__enter__()
 
-        for i in range(max_output_length):
+        for i in tqdm(range(max_output_length), desc="Running generation"):
             if profiler_ctx and i >= profile_steps:
                 break
 
