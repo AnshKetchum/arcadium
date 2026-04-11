@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# run from the project root:  bash examples/simple.sh
 
 # Define model args
 MODEL_ARGS=(
@@ -19,7 +20,7 @@ EVAL_ARGS=(
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 # Run training with both sets of args
-python pretrain_language.py \
+python -m arcadium.tasks.language.pretrain \
   "${MODEL_ARGS[@]}" \
   "${DATA_ARGS[@]}" \
   "${EVAL_ARGS[@]}" | tee "logs/out_${TIMESTAMP}.log"
