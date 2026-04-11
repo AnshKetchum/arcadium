@@ -1,5 +1,5 @@
-from utils import load_config
-from models.tasks.language.datasets.single_file import DocumentLanguageModelDatasetFromFileRandomSampling
+from arcadium.utils import load_config
+from arcadium.data.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
 
 def load_language_dataset(config_path: str):
     # Load data configuration

@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt 
 import torch
 import time
-from models.components.attentions.grouped_query_attention import GroupedQueryAttention
-from models.components.attentions.multi_head_attention import MultiHeadAttention
-from models.components.attentions.multi_query_attention import MultiQueryAttention
+from arcadium.components.attentions.grouped_query_attention import GroupedQueryAttention
+from arcadium.components.attentions.multi_head_attention import MultiHeadAttention
+from arcadium.components.attentions.multi_query_attention import MultiQueryAttention
 
 # Benchmark function
 def benchmark_attention(attn_cls, config_list, B=8, T=128, E=1024, head_dim=64, warmup=3, trials=100):
