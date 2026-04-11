@@ -1,9 +1,8 @@
 import argparse
 import torch
-from lm_eval import simple_evaluate
-from lm_eval.models.huggingface import HFLM
 from safetensors.torch import load_file
 from models.loader import load_language_model, load_language_model_from_pretrained
+from pretrain_language import run_lm_eval
 
 
 def parse_args():
@@ -30,6 +29,11 @@ def parse_args():
                         help="Batch size passed to HFLM ('auto' or an integer)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of examples per task (useful for quick tests)")
+    parser.add_argument("--num_runs", type=int, default=1,
+                        help="Number of times to repeat each eval; reports min/max across runs")
+    parser.add_argument("--gpu_memory_fraction", type=float, default=None,
+                        help="Fraction of GPU VRAM to allow lm-eval to use (0.0–1.0). "
+                             "Omit to use all available VRAM.")
     parser.add_argument("--device", type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
@@ -53,25 +57,27 @@ def main():
 
     model.eval()
 
-    max_len = getattr(model.config, "max_position_embeddings", 1024)
-    lm = HFLM(
-        pretrained=model,
-        tokenizer=tokenizer,
-        batch_size=args.batch_size,
-        max_length=max_len,
-    )
+    eval_conf = {
+        "tasks": args.tasks,
+        "num_fewshot": args.num_fewshot,
+        "limit": args.limit,
+        "batch_size": args.batch_size,
+        "num_runs": args.num_runs,
+        "gpu_memory_fraction": args.gpu_memory_fraction,
+    }
+    results = run_lm_eval(model, tokenizer, eval_conf, device)
 
-    results = simple_evaluate(
-        model=lm,
-        tasks=args.tasks,
-        num_fewshot=args.num_fewshot,
-        limit=args.limit,
-    )
-
-    for task, res in results.get("results", {}).items():
+    for task, res in results.items():
         print(f"== {task}, shots: {args.num_fewshot} ==")
-        for metric, val in res.items():
-            print(f"  {metric}: {val}")
+        for metric, agg in res.items():
+            if isinstance(agg, dict) and "runs" in agg:
+                runs_str = ", ".join(f"{v:.4f}" for v in agg["runs"] if isinstance(v, float))
+                if "min" in agg:
+                    print(f"  {metric}: min={agg['min']:.4f}  max={agg['max']:.4f}  runs=[{runs_str}]")
+                else:
+                    print(f"  {metric}: [{runs_str}]")
+            else:
+                print(f"  {metric}: {agg}")
 
 
 if __name__ == "__main__":
