@@ -3,6 +3,9 @@ parameters:
   # Any task name accepted by lm_eval.simple_evaluate is valid.
   tasks:
     - wikitext
+    - arc_easy
+    - arc_challenge
+    - mmlu
 
   # Number of few-shot examples (0 = zero-shot)
   num_fewshot: 0
@@ -13,3 +16,11 @@ parameters:
 
   # Batch size passed to HFLM. "auto" lets lm-eval choose.
   batch_size: 2
+
+  # Number of times to repeat each eval. All run values are saved; min/max are
+  # reported to avoid benchmaxing (cherry-picking the best single run).
+  num_runs: 2
+
+  # Fraction of GPU memory to allow lm-eval to use (0.0–1.0).
+  # Set to null to use all available VRAM (default).
+  gpu_memory_fraction: 0.85

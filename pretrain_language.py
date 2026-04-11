@@ -95,30 +95,60 @@ def training_step(net, batch, labels):
 
 def run_lm_eval(net, tokenizer, eval_conf, device):
     """
-    Run lm-eval tasks defined in eval_conf against net and return the results dict.
+    Run lm-eval tasks defined in eval_conf against net and return aggregated results.
 
     eval_conf keys:
-      tasks       - list of lm-eval task names (required)
-      num_fewshot - number of few-shot examples (default 0)
-      limit       - cap examples per task, useful for quick checks (default None)
-      batch_size  - passed to HFLM (default "auto")
+      tasks                - list of lm-eval task names (required)
+      num_fewshot          - number of few-shot examples (default 0)
+      limit                - cap examples per task, useful for quick checks (default None)
+      batch_size           - passed to HFLM (default "auto")
+      gpu_memory_fraction  - fraction of GPU VRAM to allow (0.0–1.0, default None = unlimited)
+      num_runs             - number of times to repeat each eval; all runs are saved and
+                             min/max are reported (default 1)
+
+    Returns a dict keyed by task name. Each metric value is a dict:
+      { "runs": [v0, v1, ...], "min": float, "max": float }
+    When num_runs=1 the runs list has one element and min==max.
 
     Requires tokenizer to be a HuggingFace PreTrainedTokenizer.
     """
+    mem_frac = eval_conf.get("gpu_memory_fraction")
+    if mem_frac is not None and torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(float(mem_frac))
+
+    num_runs = int(eval_conf.get("num_runs", 1))
     max_len = getattr(net.config, "max_position_embeddings", 1024)
-    lm = HFLM(
-        pretrained=net,
-        tokenizer=tokenizer,
-        batch_size=eval_conf.get("batch_size", "auto"),
-        max_length=max_len,
-    )
-    results = simple_evaluate(
-        model=lm,
-        tasks=eval_conf["tasks"],
-        num_fewshot=eval_conf.get("num_fewshot", 0),
-        limit=eval_conf.get("limit", None),
-    )
-    return results.get("results", {})
+
+    all_runs = []
+    for run_idx in range(num_runs):
+        if num_runs > 1:
+            print(f"  lm-eval run {run_idx + 1}/{num_runs}")
+        lm = HFLM(
+            pretrained=net,
+            tokenizer=tokenizer,
+            batch_size=eval_conf.get("batch_size", "auto"),
+            max_length=max_len,
+        )
+        raw = simple_evaluate(
+            model=lm,
+            tasks=eval_conf["tasks"],
+            num_fewshot=eval_conf.get("num_fewshot", 0),
+            limit=eval_conf.get("limit", None),
+        )
+        all_runs.append(raw.get("results", {}))
+
+    # Aggregate: for each task/metric collect all run values then compute min/max
+    aggregated = {}
+    for task, metrics in all_runs[0].items():
+        aggregated[task] = {}
+        for metric, val in metrics.items():
+            if isinstance(val, (int, float)):
+                vals = [r[task][metric] for r in all_runs if isinstance(r[task].get(metric), (int, float))]
+                aggregated[task][metric] = {"runs": vals, "min": min(vals), "max": max(vals)}
+            else:
+                aggregated[task][metric] = {"runs": [r[task].get(metric) for r in all_runs]}
+
+    return aggregated
 
 
 def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10, step=0):
@@ -347,7 +377,8 @@ def pretrain(
 
             # lm-eval (optional)
             if eval_config is not None and tokenizer is not None:
-                print(f"[iter {i}] Running lm-eval: {eval_config['tasks']}")
+                num_runs = int(eval_config.get("num_runs", 1))
+                print(f"[iter {i}] Running lm-eval ({num_runs} run(s)): {eval_config['tasks']}")
                 net.eval()
                 eval_results = run_lm_eval(net, tokenizer, eval_config, device)
                 net.train()
@@ -355,14 +386,22 @@ def pretrain(
                     "iter": i,
                     "tasks": eval_config["tasks"],
                     "num_fewshot": eval_config.get("num_fewshot", 0),
+                    "num_runs": num_runs,
                     "results": eval_results,
                 }
                 with open(os.path.join(checkpoint_dir, "eval_results.json"), "w") as f:
                     json.dump(eval_out, f, indent=2)
+                wandb_metrics = {}
                 for task, res in eval_results.items():
-                    for metric, val in res.items():
-                        if isinstance(val, (int, float)):
-                            wandb.log({f"eval/{task}/{metric}": val}, step=i)
+                    for metric, agg in res.items():
+                        if not isinstance(agg, dict) or "min" not in agg:
+                            continue
+                        wandb_metrics[f"eval/{task}/{metric}/min"] = agg["min"]
+                        wandb_metrics[f"eval/{task}/{metric}/max"] = agg["max"]
+                        for run_idx, v in enumerate(agg["runs"]):
+                            if isinstance(v, (int, float)):
+                                wandb_metrics[f"eval/{task}/{metric}/run_{run_idx}"] = v
+                wandb.log(wandb_metrics, step=i)
                 print(f"[iter {i}] lm-eval saved → {checkpoint_dir}/eval_results.json")
 
             # Visualizations

@@ -12,7 +12,7 @@ DATA_ARGS=(
 
 # Optional: run lm-eval at every checkpoint (remove to skip)
 EVAL_ARGS=(
-  --eval_config configs/eval/wikitext.yaml
+  --eval_config configs/eval/basic.yaml
 )
 
 # Generate timestamp
