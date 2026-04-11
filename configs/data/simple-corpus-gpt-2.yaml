@@ -1,4 +1,0 @@
-parameters:
-  type: "local"
-  folders: 
-    - data/starter-small/processed/gpt-2

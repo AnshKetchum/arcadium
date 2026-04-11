@@ -72,6 +72,9 @@ def _config_from_yaml(conf_dict: dict, vocab_size: int) -> LanguageModelConfig:
         kwargs["experts"] = decoder.get("experts", 8)
         kwargs["top_k"] = decoder.get("top_k", 2)
 
+    if "max_position_embeddings" in cfg.get("model", {}):
+        kwargs["max_position_embeddings"] = cfg["model"]["max_position_embeddings"]
+
     return LanguageModelConfig(**kwargs)
 
 

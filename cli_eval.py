@@ -1,6 +1,7 @@
 import argparse
 import torch
-import lm_eval
+from lm_eval import simple_evaluate
+from lm_eval.models.huggingface import HFLM
 from safetensors.torch import load_file
 from models.loader import load_language_model, load_language_model_from_pretrained
 
@@ -52,13 +53,15 @@ def main():
 
     model.eval()
 
-    lm = lm_eval.models.huggingface.HFLM(
+    max_len = getattr(model.config, "max_position_embeddings", 1024)
+    lm = HFLM(
         pretrained=model,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
+        max_length=max_len,
     )
 
-    results = lm_eval.simple_evaluate(
+    results = simple_evaluate(
         model=lm,
         tasks=args.tasks,
         num_fewshot=args.num_fewshot,

@@ -27,6 +27,8 @@ class LanguageModelConfig(PretrainedConfig):
         # MoE-specific
         experts: int = 8,
         top_k: int = 2,
+        # Context window — used by lm-eval and HF ecosystem to bound sequence length
+        max_position_embeddings: int = 1024,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -44,6 +46,7 @@ class LanguageModelConfig(PretrainedConfig):
         self.head_dimension = head_dimension
         self.experts = experts
         self.top_k = top_k
+        self.max_position_embeddings = max_position_embeddings
 
 
 def _build_transformer(config: LanguageModelConfig):

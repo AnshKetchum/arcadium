@@ -11,6 +11,8 @@ import wandb
 import math
 import glob
 import re
+from lm_eval import simple_evaluate
+from lm_eval.models.huggingface import HFLM
 from safetensors.torch import load_file
 from models.loader import load_language_model, load_dataset
 from models.tasks.language.datasets.sequence_length import SequenceLengthSampler
@@ -103,13 +105,14 @@ def run_lm_eval(net, tokenizer, eval_conf, device):
 
     Requires tokenizer to be a HuggingFace PreTrainedTokenizer.
     """
-    import lm_eval
-    lm = lm_eval.models.huggingface.HFLM(
+    max_len = getattr(net.config, "max_position_embeddings", 1024)
+    lm = HFLM(
         pretrained=net,
         tokenizer=tokenizer,
         batch_size=eval_conf.get("batch_size", "auto"),
+        max_length=max_len,
     )
-    results = lm_eval.simple_evaluate(
+    results = simple_evaluate(
         model=lm,
         tasks=eval_conf["tasks"],
         num_fewshot=eval_conf.get("num_fewshot", 0),

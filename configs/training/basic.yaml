@@ -7,6 +7,9 @@ parameters:
   num_workers: 0
   sequence_length: 32
   lr: 0.001
+  optimizer:
+    name: "adam"
+    lr: 0.001                  # decreased from 0.001
   training_sequence_length:
     start: 32
     end: 1024

@@ -24,7 +24,7 @@ class DocumentLanguageModelDatasetFromShardsRandomSampling(Dataset):
             for f in os.listdir(shard_folder) 
             if os.path.isfile(os.path.join(shard_folder, f)) and f.endswith(".pkl")
         ]
-        assert len(self.shards) > 0, "No shard files found in folder"
+        assert len(self.shards) > 0, f"No shard files found in folder {shard_folder}. Make sure all shards end in .pkl"
 
         # Load all shards into memory
         self.token_lists = []
