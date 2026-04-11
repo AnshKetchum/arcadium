@@ -1,5 +1,2 @@
 parameters:
-  tokenizer_type: "huggingface"
-  tokenizer_path: "tokenizers/gpt-2"
-  model_name: "gpt2"
-  
+  model_name_or_path: "gpt2"

@@ -1,20 +1,9 @@
-import torch 
-import torch.nn as nn
-import os 
+import torch
+import os
 from typing import Tuple
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-# mixture of experts
-from models.tasks.language.backbones.moe import MoETransformerParams, MoETransformer
-from models.tasks.language.backbones.moe import MoETransformer
-
-# dense (gpt-like)
-from models.tasks.language.backbones.dense import DenseTransformerParams, DenseTransformer
-from models.tasks.language.backbones.dense import DenseTransformer
-
-
-from models.tasks.language.architecture import LanguageModel
-from models.tasks.language.tokenizer.base import BaseTokenizer, BasicTokenizer
-from models.tasks.language.tokenizer.huggingface import HuggingFaceTokenizer
+from models.tasks.language.architecture import LanguageModel, LanguageModelConfig
 
 # Datasets
 from models.tasks.language.datasets.sequence_length import SequenceLengthScheduler
@@ -24,80 +13,102 @@ from models.tasks.language.datasets.multi_dataset import AggregatedRoundRobinDat
 
 from utils import load_config
 
-def ingest_file(fl: str, tok: BasicTokenizer):
-    assert os.path.exists(fl), f"Path {fl} no longer exists"
 
-    with open(fl, "r") as f:
-        data = f.read()
-        tokens = BasicTokenizer.get_tokens(data)
-
-    tok.ingest(tokens)
-
-def load_tokenizer(tokenizer_path: str, tokenizer_type: str = "basic", **kwargs):
-    BASIC_TOKENIZER = "basic"
-    HUGGINGFACE_TOKENIZER = "huggingface"
-
-    if tokenizer_type == BASIC_TOKENIZER:
-        tok = BasicTokenizer()
-    elif tokenizer_type == HUGGINGFACE_TOKENIZER:
-        tok = HuggingFaceTokenizer(kwargs["model_name"])
-    
-    if tokenizer_path and os.path.exists(tokenizer_path):
-        tok.load(tokenizer_path)
-    
+def load_tokenizer(model_name_or_path: str) -> PreTrainedTokenizerBase:
+    """
+    Load a HuggingFace tokenizer from a pretrained model name (e.g. "gpt2") or a
+    local directory saved with tokenizer.save_pretrained().
+    """
+    tok = AutoTokenizer.from_pretrained(model_name_or_path)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
     return tok
 
-def load_dataset(data_config: str, sequence_length: int, debug = False, **kwargs): 
 
+def load_dataset(data_config: str, sequence_length: int, debug=False, **kwargs):
     conf = load_config(data_config, "parameters")
     LOCAL = "local"
     FINEWEB = "fineweb"
 
     datasets = []
 
-    
     if conf["type"] == LOCAL:
         for fldr in conf.get("folders", []):
             datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
-                fldr, 
-                sequence_length,
-                debug=debug,
-                **kwargs
+                fldr, sequence_length, debug=debug, **kwargs
             ))
     elif conf["type"] == FINEWEB:
         for fldr in conf.get("folders", []):
             datasets.append(FineWebBinaryDataset(
-                fldr, 
-                sequence_length,
-                debug=debug,
-                **kwargs
+                fldr, sequence_length, debug=debug, **kwargs
             ))
 
     return AggregatedRoundRobinDataset(datasets)
 
-def load_language_model(configuration_path: str, device: torch.device) -> Tuple[str, str, LanguageModel, BaseTokenizer]:
-    # Load the entire model configuration
+
+def _config_from_yaml(conf_dict: dict, vocab_size: int) -> LanguageModelConfig:
+    """Build a LanguageModelConfig from the model YAML configuration dict."""
+    architecture_type = conf_dict["type"]
+    cfg = conf_dict["configuration"]
+    decoder = cfg["decoder"]
+    attn = decoder["attention"]
+
+    kwargs = dict(
+        vocab_size=vocab_size,
+        architecture_type=architecture_type,
+        decoder_layers=cfg["model"]["decoder_layers"],
+        input_dimension=decoder["input_dimension"],
+        output_dimension=decoder["output_dimension"],
+        hidden_dimension=decoder["hidden_dimension"],
+        norm_eps=decoder.get("norm_eps", 1e-5),
+        attention_type=attn["type"],
+        num_query_heads=attn["num_query_heads"],
+        num_kv_heads=attn["num_kv_heads"],
+        embedding_dimension=attn["embedding_dimension"],
+        head_dimension=attn["head_dimension"],
+    )
+
+    if architecture_type == "moe":
+        kwargs["experts"] = decoder.get("experts", 8)
+        kwargs["top_k"] = decoder.get("top_k", 2)
+
+    if "max_position_embeddings" in cfg.get("model", {}):
+        kwargs["max_position_embeddings"] = cfg["model"]["max_position_embeddings"]
+
+    return LanguageModelConfig(**kwargs)
+
+
+def load_language_model(
+    configuration_path: str,
+    device: torch.device,
+) -> Tuple[str, str, LanguageModel, PreTrainedTokenizerBase]:
+    """
+    Load a model and its tokenizer from a YAML config.
+    Returns (name, architecture_type, model, tokenizer).
+    """
     conf_dict = load_config(configuration_path, "parameters")
 
-    ## Loading the tokenizer 
-    tokenizer_config = load_config(conf_dict['tokenizer']['config'], "parameters")
+    tokenizer_config = load_config(conf_dict["tokenizer"]["config"], "parameters")
     tokenizer = load_tokenizer(**tokenizer_config)
-    
-    ## Loading the model
 
-    # Extract name
     conf_name = conf_dict["name"]
-    print("Configuring ... ", conf_name)
-
-    # Extract type
     conf_type = conf_dict["type"]
+    print("Configuring ...", conf_name)
 
-    if conf_type == "moe":
-        conf = MoETransformerParams(**conf_dict["configuration"])
-        net = LanguageModel(MoETransformer, conf, tokenizer.size())
-    if conf_type == "dense":
-        conf = DenseTransformerParams(**conf_dict["configuration"])
-        net = LanguageModel(DenseTransformer, conf, tokenizer.size())
+    hf_config = _config_from_yaml(conf_dict, vocab_size=len(tokenizer))
+    net = LanguageModel(hf_config).to(device)
 
-    net = net.to(device)
     return conf_name, conf_type, net, tokenizer
+
+
+def load_language_model_from_pretrained(
+    pretrained_dir: str,
+    device: torch.device,
+) -> Tuple[LanguageModel, PreTrainedTokenizerBase]:
+    """
+    Load a model and tokenizer from a directory saved with save_pretrained().
+    Tokenizer files are expected to live directly in pretrained_dir.
+    """
+    net = LanguageModel.from_pretrained(pretrained_dir).to(device)
+    tokenizer = load_tokenizer(pretrained_dir)
+    return net, tokenizer

@@ -1,27 +1,25 @@
 import argparse
 import time
-import torch 
-import torch.nn as nn
+import torch
 import json
-import os 
-from dotenv import load_dotenv 
-from models.loader import load_language_model, load_tokenizer
-from models.tasks.language.tokenizer.base import BasicTokenizer
+import os
+from dotenv import load_dotenv
+from safetensors.torch import load_file
+from models.loader import load_language_model
 from models.tasks.language.architecture import LanguageModel
 from torch.profiler import profile, record_function, ProfilerActivity
 from tqdm import tqdm
-from utils import load_config
 
 load_dotenv()
 
+
 def sample_highest_prob(logits):
-    optimal_index = torch.argmax(logits, dim = -1)
-    next_token_id = optimal_index[:, -1].item()
-    return next_token_id
+    return torch.argmax(logits, dim=-1)[:, -1].item()
+
 
 def generate(
     input_data: str,
-    tokenizer: BasicTokenizer,
+    tokenizer,
     net: LanguageModel,
     device: torch.device,
     max_output_length: int = 100,
@@ -30,13 +28,20 @@ def generate(
     checkpoint_path: str = "",
     tokenizer_path: str = "",
     profile_steps: int = 0,
-    use_kv_cache: bool = False
+    use_kv_cache: bool = False,
 ):
+    """
+    Greedily generate up to max_output_length tokens from input_data.
+
+    Saves a JSON result to generation_folder if that directory exists.
+    Returns the decoded output string (prompt + generated tokens).
+    """
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
+    n_prompt_tokens = len(tokenized_input_data)
+    n_new = 0
 
-    new_tokens = []
     profiler_ctx = (
         profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
@@ -58,45 +63,38 @@ def generate(
     time_to_first_token = None
     prev_time = time.time()
 
-    metadata = {
-        "use_kv_cache" : use_kv_cache
-    }
-
     with torch.no_grad():
         if profiler_ctx:
             profiler_ctx.__enter__()
 
-        for i in tqdm(range(max_output_length), desc="Running generation"):
+        for i in tqdm(range(max_output_length), desc="Generating"):
             if profiler_ctx and i >= profile_steps:
                 break
 
-            input_tensor = torch.tensor(
-                [tokenized_input_data], device=device, dtype=torch.int
-            )
+            input_tensor = torch.tensor([tokenized_input_data], device=device, dtype=torch.int)
 
             if profiler_ctx:
                 with record_function("logits_generation"):
-                    logits = net(input_tensor, **metadata)
+                    output = net(input_tensor, use_kv_cache=use_kv_cache)
             else:
-                logits = net(input_tensor, **metadata)
+                output = net(input_tensor, use_kv_cache=use_kv_cache)
 
+            logits = output.logits if hasattr(output, "logits") else output
             next_token_id = sample_highest_prob(logits)
 
             now = time.time()
-            if len(new_tokens) == 0:
-                # Time to first token
+            if n_new == 0:
                 time_to_first_token = now - prev_time
             else:
-                # Time per token
                 per_token_times.append(now - prev_time)
             prev_time = now
 
-            if next_token_id == tokenizer.get_end_of_sequence_token():
-                print("EOS Token reached")
+            if next_token_id == tokenizer.eos_token_id:
+                print("EOS reached")
                 break
 
             tokenized_input_data.append(next_token_id)
-            new_tokens.append(tokenizer.decode_single(next_token_id))
+            n_new += 1
 
             if profiler_ctx:
                 profiler_ctx.step()
@@ -104,94 +102,63 @@ def generate(
         if profiler_ctx:
             profiler_ctx.__exit__(None, None, None)
 
-    output = " ".join(BasicTokenizer.get_tokens(input_data) + new_tokens)
+    output_text = tokenizer.decode(tokenized_input_data)
+
     if os.path.exists(generation_folder) and os.path.isdir(generation_folder):
         data = {
-            "output": output,
+            "output": output_text,
             "max_output_length": max_output_length,
             "model_name": name,
             "checkpoint_path": checkpoint_path,
             "tokenizer_path": tokenizer_path,
-            "total_generated_tokens": len(new_tokens),
-            "total_length_tokens": len(BasicTokenizer.get_tokens(input_data))
-            + len(new_tokens),
+            "total_generated_tokens": n_new,
+            "total_length_tokens": len(tokenized_input_data),
             "profiled_steps": profile_steps,
             "time_to_first_token": time_to_first_token,
             "per_token_times": per_token_times,
-            "mean_per_token_time": sum(per_token_times) / len(per_token_times)
-            if per_token_times
-            else None,
+            "mean_per_token_time": sum(per_token_times) / len(per_token_times) if per_token_times else None,
         }
-
-        save_path = os.path.join(
-            generation_folder, f"generation-{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
-        )
+        save_path = os.path.join(generation_folder, f"generation-{time.strftime('%Y-%m-%d_%H-%M-%S')}.json")
         with open(save_path, "w") as f:
             json.dump(data, f, indent=2)
 
-    print(tokenized_input_data)
-    return output
+    return output_text
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate data using a language model.")
-
+    parser = argparse.ArgumentParser(description="Generate text from an arcadium language model.")
     parser.add_argument("--model_config", type=str, default="configs/models/tiny-moe.yaml",
-                    help="Path to model config YAML")
-
-    parser.add_argument("--checkpoint_path", type=str, help="Path to model checkpoint")
-    parser.add_argument("--tokenizer_path", type=str, help="Path to tokenizer pkl file", default="tokenizer.pkl")
-
-    parser.add_argument("--input_data", type=str, help="Input data to generate")
-    parser.add_argument("--max_output_tokens", type=int, help="Maximum tokens to generate", default=100)
-    parser.add_argument("--device", type=str, help="Hardware device to generate on", default="cuda")
-    parser.add_argument("--seed", type=int, help="Seed for reproducibility", default=1)
-    parser.add_argument("--generation_folder", type=str, help="Folder to save generations", default="generations")
-    parser.add_argument("--use_kv_cache", action="store_true", dest="kv_cache")
-
-    # New profiling args
+                        help="Path to model config YAML")
+    parser.add_argument("--checkpoint_path", type=str, required=True,
+                        help="Path to a checkpoint directory (saved with save_pretrained) or a "
+                             ".pt file (legacy format, loads model_state_dict key)")
+    parser.add_argument("--input_data", type=str, required=True, help="Prompt text")
+    parser.add_argument("--max_output_tokens", type=int, default=100)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--generation_folder", type=str, default="generations")
+    parser.add_argument("--use_kv_cache", action="store_true")
     parser.add_argument("--profile", type=int, default=0,
-                        help="Number of steps to profile with torch.profiler (0 = disable)")
-
+                        help="Steps to profile with torch.profiler (0 = disabled)")
     args = parser.parse_args()
 
-    # --- Load configs ---
-    model_config = args.model_config
-    tokenizer_path = args.tokenizer_path
-    checkpoint_path = args.checkpoint_path
-    input_data = args.input_data
-    hardware_device = args.device
-    seed = args.seed
-    generation_folder = args.generation_folder
-    profile_steps = args.profile
-    use_kv_cache = args.kv_cache
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    os.makedirs(args.generation_folder, exist_ok=True)
 
-    os.makedirs(generation_folder, exist_ok=True)
+    name, _, net, tokenizer = load_language_model(args.model_config, device)
 
-    # Plant our seed for reproducibility
-    torch.manual_seed(seed)
-    print("Using a seed of ", seed)
-
-    # Hardware
-    device = torch.device(hardware_device if torch.cuda.is_available() else "cpu")
-
-    # Load net 
-    name, model_type, net, tokenizer = load_language_model(model_config, device)
-    checkpoint = torch.load(checkpoint_path)
-    net.load_state_dict(checkpoint["model_state_dict"])
+    # Support both checkpoint directories (save_pretrained) and legacy .pt files
+    if os.path.isdir(args.checkpoint_path):
+        from models.loader import load_language_model_from_pretrained
+        net, tokenizer = load_language_model_from_pretrained(args.checkpoint_path, device)
+    else:
+        state = torch.load(args.checkpoint_path, map_location=device)
+        net.load_state_dict(state["model_state_dict"])
 
     result = generate(
-        input_data,
-        tokenizer, 
-        net, 
-        device, 
-        args.max_output_tokens,
-        name,
-        generation_folder,
-        checkpoint_path,
-        tokenizer_path,
-        profile_steps,
-        use_kv_cache
+        args.input_data, tokenizer, net, device,
+        args.max_output_tokens, name, args.generation_folder,
+        args.checkpoint_path, "", args.profile, args.use_kv_cache,
     )
-
-    print("Output text", result)
+    print("Output:", result)

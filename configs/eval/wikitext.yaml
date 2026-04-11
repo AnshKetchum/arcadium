@@ -1,0 +1,15 @@
+parameters:
+  # lm-eval tasks to run at each checkpoint.
+  # Any task name accepted by lm_eval.simple_evaluate is valid.
+  tasks:
+    - wikitext
+
+  # Number of few-shot examples (0 = zero-shot)
+  num_fewshot: 0
+
+  # Cap examples per task — useful for quick checks during training.
+  # Set to null to evaluate the full dataset.
+  limit: null
+
+  # Batch size passed to HFLM. "auto" lets lm-eval choose.
+  batch_size: 2
