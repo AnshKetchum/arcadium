@@ -13,7 +13,7 @@ also, to train an MoE model :D
 # Setup 
 
 ```bash
-uv pip install -r requirements.txt
+uv sync
 ```
 
 # Pretraining from scratch
