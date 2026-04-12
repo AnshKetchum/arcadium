@@ -43,12 +43,11 @@ class MoEDecoder(nn.Module):
     attn = self.attn(pre_norm, **kwargs)
     post_norm_sum = attn + x
     post_norm = self.post_attn_norm(post_norm_sum)
-    ffn_output = self.ffn(post_norm)
+    ffn_output, aux_loss = self.ffn(post_norm)
     output = ffn_output + post_norm_sum
 
-    final_shape = output.shape
-    assert initial_shape == final_shape
-    return output
+    assert initial_shape == output.shape
+    return output, aux_loss
 
 class MoETransformer(nn.Module):
   def __init__(self, config: MoETransformerParams):
@@ -67,13 +66,15 @@ class MoETransformer(nn.Module):
 
   def forward(self, x, **kwargs):
     o = x
+    aux_loss = None
 
-    for i, l in enumerate(self.decoder_layers):
-        o = l(o, **kwargs)
+    for l in self.decoder_layers:
+        o, layer_aux = l(o, **kwargs)
+        aux_loss = layer_aux if aux_loss is None else aux_loss + layer_aux
 
     o = self.final_norm(o)
     o = self.ffn(o)
-    return o
+    return o, aux_loss
 
   def metadata(self):
     data =  []

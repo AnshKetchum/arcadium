@@ -1,21 +1,5 @@
 parameters:
-  name: gpt-basic-1m-64-emb-1L
-  type: "dense"
-  configuration:
-    model:
-      decoder_layers: 8
-    decoder:
-      input_dimension: 64
-      output_dimension: 64
-      hidden_dimension: 128
-      norm_eps: 1.0e-05
-      attention:
-        type: "multi-head"
-        num_query_heads: 8
-        num_kv_heads: 8
-        embedding_dimension: 64
-        head_dimension: 64
-        kv_cache: 
-          enabled: True
+  name: "tiny-dense-64d-8l-mha-gpt2tok"
+  architecture_config: arcadium/arcadium/models/dense/configs/tiny-dense-64d-8l-mha.yaml
   tokenizer:
     config: configs/tokenizer/gpt-2.yaml

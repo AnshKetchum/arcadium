@@ -1,0 +1,6 @@
+architecture: gpt2
+n_blocks: 24
+d_model: 1024
+n_heads: 16
+max_sequence_length: 1024
+mlp_expansion_factor: 4.0

@@ -1,0 +1,12 @@
+architecture: moe
+decoder_layers: 8
+input_dimension: 64
+output_dimension: 64
+hidden_dimension: 64
+experts: 8
+norm_eps: 1.0e-05
+attention_type: grouped-query
+num_query_heads: 8
+num_kv_heads: 1
+embedding_dimension: 64
+head_dimension: 32

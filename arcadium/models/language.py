@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PretrainedConfig
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from arcadium.models.output import LMOutput
 
 
 class LanguageModelConfig(PretrainedConfig):
@@ -126,7 +126,7 @@ class LanguageModel(PreTrainedModel):
         )
 
         x = self.embed(input_ids)
-        h = self.transformer(x, **kwargs)
+        h, aux_loss = self.transformer(x, **kwargs)
         logits = self.lm_head(h)
 
         loss = None
@@ -136,7 +136,7 @@ class LanguageModel(PreTrainedModel):
                 labels[:, 1:].contiguous().view(-1),
             )
 
-        return CausalLMOutputWithPast(loss=loss, logits=logits)
+        return LMOutput(loss=loss, logits=logits, auxiliary_loss=aux_loss)
 
     def get_output_dimension(self):
         return self.vocab_size
