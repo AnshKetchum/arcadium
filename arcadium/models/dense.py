@@ -58,12 +58,12 @@ class DenseTransformer(nn.Module):
   def forward(self, x, **kwargs):
     o = x
 
-    for i, l in enumerate(self.decoder_layers):
+    for l in self.decoder_layers:
         o = l(o, **kwargs)
 
     o = self.final_norm(o)
     o = self.ffn(o)
-    return o
+    return o, None
 
   def metadata(self):
     data =  []

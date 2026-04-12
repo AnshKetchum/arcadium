@@ -1,7 +1,6 @@
 import torch
-import os
 from typing import Tuple
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 from arcadium.models.language import LanguageModel, LanguageModelConfig
 
@@ -15,10 +14,6 @@ from arcadium.utils import load_config
 
 
 def load_tokenizer(model_name_or_path: str) -> PreTrainedTokenizerBase:
-    """
-    Load a HuggingFace tokenizer from a pretrained model name (e.g. "gpt2") or a
-    local directory saved with tokenizer.save_pretrained().
-    """
     tok = AutoTokenizer.from_pretrained(model_name_or_path)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -46,68 +41,69 @@ def load_dataset(data_config: str, sequence_length: int, debug=False, **kwargs):
     return AggregatedRoundRobinDataset(datasets)
 
 
-def _config_from_yaml(conf_dict: dict, vocab_size: int) -> LanguageModelConfig:
-    """Build a LanguageModelConfig from the model YAML configuration dict."""
-    architecture_type = conf_dict["type"]
-    cfg = conf_dict["configuration"]
-    decoder = cfg["decoder"]
-    attn = decoder["attention"]
+def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:
+    architecture = arch["architecture"]
+    cfg = {k: v for k, v in arch.items() if k != "architecture"}
+    cfg["vocab_size"] = vocab_size
 
-    kwargs = dict(
-        vocab_size=vocab_size,
-        architecture_type=architecture_type,
-        decoder_layers=cfg["model"]["decoder_layers"],
-        input_dimension=decoder["input_dimension"],
-        output_dimension=decoder["output_dimension"],
-        hidden_dimension=decoder["hidden_dimension"],
-        norm_eps=decoder.get("norm_eps", 1e-5),
-        attention_type=attn["type"],
-        num_query_heads=attn["num_query_heads"],
-        num_kv_heads=attn["num_kv_heads"],
-        embedding_dimension=attn["embedding_dimension"],
-        head_dimension=attn["head_dimension"],
-    )
+    if architecture == "gpt2":
+        from arcadium.models.gpt2 import GPT2, GPT2Config
+        return GPT2(GPT2Config(**cfg))
 
-    if architecture_type == "moe":
-        kwargs["experts"] = decoder.get("experts", 8)
-        kwargs["top_k"] = decoder.get("top_k", 2)
+    if architecture == "olmo2":
+        from arcadium.models.olmo2 import OLMo2, OLMo2Config
+        return OLMo2(OLMo2Config(**cfg))
 
-    if "max_position_embeddings" in cfg.get("model", {}):
-        kwargs["max_position_embeddings"] = cfg["model"]["max_position_embeddings"]
+    if architecture in ("dense", "moe"):
+        from arcadium.components.attentions import AttentionParameters
+        config = LanguageModelConfig(
+            vocab_size=vocab_size,
+            architecture_type=architecture,
+            decoder_layers=cfg["decoder_layers"],
+            input_dimension=cfg["input_dimension"],
+            output_dimension=cfg["output_dimension"],
+            hidden_dimension=cfg["hidden_dimension"],
+            norm_eps=cfg.get("norm_eps", 1e-5),
+            attention_type=cfg["attention_type"],
+            num_query_heads=cfg["num_query_heads"],
+            num_kv_heads=cfg["num_kv_heads"],
+            embedding_dimension=cfg["embedding_dimension"],
+            head_dimension=cfg["head_dimension"],
+            experts=cfg.get("experts", 8),
+            top_k=cfg.get("top_k", 2),
+            max_position_embeddings=cfg.get("max_position_embeddings", 1024),
+        )
+        return LanguageModel(config)
 
-    return LanguageModelConfig(**kwargs)
+    raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
 def load_language_model(
     configuration_path: str,
     device: torch.device,
-) -> Tuple[str, str, LanguageModel, PreTrainedTokenizerBase]:
+) -> Tuple[str, str, PreTrainedModel, PreTrainedTokenizerBase]:
     """
     Load a model and its tokenizer from a YAML config.
-    Returns (name, architecture_type, model, tokenizer).
+    Returns (name, architecture, model, tokenizer).
     """
-    conf_dict = load_config(configuration_path, "parameters")
+    conf = load_config(configuration_path, "parameters")
 
-    tokenizer_config = load_config(conf_dict["tokenizer"]["config"], "parameters")
+    tokenizer_config = load_config(conf["tokenizer"]["config"], "parameters")
     tokenizer = load_tokenizer(**tokenizer_config)
 
-    conf_name = conf_dict["name"]
-    conf_type = conf_dict["type"]
-    print("Configuring ...", conf_name)
+    arch = load_config(conf["architecture_config"])
+    print("Configuring ...", conf["name"])
 
-    hf_config = _config_from_yaml(conf_dict, vocab_size=len(tokenizer))
-    net = LanguageModel(hf_config).to(device)
-
-    return conf_name, conf_type, net, tokenizer
+    net = _build_model(arch, vocab_size=len(tokenizer)).to(device)
+    return conf["name"], arch["architecture"], net, tokenizer
 
 
 def load_language_model_from_pretrained(
     pretrained_dir: str,
     device: torch.device,
-) -> Tuple[LanguageModel, PreTrainedTokenizerBase]:
+) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     """
     Load a model and tokenizer from a directory saved with save_pretrained().
-    Tokenizer files are expected to live directly in pretrained_dir.
     """
     net = LanguageModel.from_pretrained(pretrained_dir).to(device)
     tokenizer = load_tokenizer(pretrained_dir)
