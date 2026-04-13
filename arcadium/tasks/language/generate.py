@@ -29,18 +29,21 @@ def generate(
     tokenizer_path: str = "",
     profile_steps: int = 0,
     use_kv_cache: bool = False,
+    collect_hidden_states: bool = False,
 ):
     """
     Greedily generate up to max_output_length tokens from input_data.
 
     Saves a JSON result to generation_folder if that directory exists.
-    Returns the decoded output string (prompt + generated tokens).
+    Returns (output_text, hidden_states_per_step) where hidden_states_per_step is a list of
+    per-token hidden state lists when collect_hidden_states=True, else None.
     """
     net.eval()
 
     tokenized_input_data = tokenizer.encode(input_data)
     n_prompt_tokens = len(tokenized_input_data)
     n_new = 0
+    all_hidden_states = [] if collect_hidden_states else None
 
     profiler_ctx = (
         profile(
@@ -75,12 +78,17 @@ def generate(
 
             if profiler_ctx:
                 with record_function("logits_generation"):
-                    output = net(input_tensor, use_kv_cache=use_kv_cache)
+                    output = net(input_tensor, use_kv_cache=use_kv_cache, collect_hidden_states=collect_hidden_states)
             else:
-                output = net(input_tensor, use_kv_cache=use_kv_cache)
+                output = net(input_tensor, use_kv_cache=use_kv_cache, collect_hidden_states=collect_hidden_states)
 
             logits = output.logits if hasattr(output, "logits") else output
             next_token_id = sample_highest_prob(logits)
+
+            if collect_hidden_states:
+                hs = getattr(output, "metadata", None)
+                hs = hs.get("hidden_states") if isinstance(hs, dict) else None
+                all_hidden_states.append(hs)
 
             now = time.time()
             if n_new == 0:
@@ -122,7 +130,7 @@ def generate(
         with open(save_path, "w") as f:
             json.dump(data, f, indent=2)
 
-    return output_text
+    return output_text, all_hidden_states
 
 
 if __name__ == "__main__":
@@ -155,7 +163,7 @@ if __name__ == "__main__":
         state = torch.load(args.checkpoint_path, map_location=device)
         net.load_state_dict(state["model_state_dict"])
 
-    result = generate(
+    result, _ = generate(
         args.input_data, tokenizer, net, device,
         args.max_output_tokens, name, args.generation_folder,
         args.checkpoint_path, "", args.profile, args.use_kv_cache,

@@ -54,6 +54,10 @@ def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:
         from arcadium.models.olmo2 import OLMo2, OLMo2Config
         return OLMo2(OLMo2Config(**cfg))
 
+    if architecture == "universal_transformer":
+        from arcadium.models.universal_transformer import UniversalTransformer, UniversalTransformerConfig
+        return UniversalTransformer(UniversalTransformerConfig(**cfg))
+
     if architecture in ("dense", "moe"):
         from arcadium.components.attentions import AttentionParameters
         config = LanguageModelConfig(

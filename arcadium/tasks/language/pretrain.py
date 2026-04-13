@@ -3,6 +3,7 @@ from collections import defaultdict
 import json
 import shutil
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import os
 import time
@@ -85,12 +86,13 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler):
 # ---------------------------------------------------------------------------
 
 def training_step(net, batch, labels):
-    """Forward pass. Returns (logits, loss)."""
+    """Forward pass. Returns (logits, loss, metadata)."""
     output = net(batch)
     logits = output.logits if hasattr(output, "logits") else output
+    metadata = output.metadata if hasattr(output, "metadata") else {}
     B, T, V = logits.shape
     loss = F.cross_entropy(logits.view(B * T, V), labels.view(B * T))
-    return logits, loss
+    return logits, loss, metadata
 
 
 def run_lm_eval(net, tokenizer, eval_conf, device):
@@ -169,7 +171,7 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
             except StopIteration:
                 break
             batch, labels = batch.to(device), labels.to(device)
-            _, loss = training_step(net, batch=batch, labels=labels)
+            logits, loss, metadata = training_step(net, batch=batch, labels=labels)
             val_loss_total += loss.item()
             n_batches += 1
 
@@ -185,7 +187,7 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
             break
         prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
         prompt_text = tokenizer.decode(prompt_tokens)
-        output_text = generate(
+        output_text, _ = generate(
             prompt_text, tokenizer, net, device,
             max_output_length=50, generation_folder="",
             checkpoint_path="", tokenizer_path="",
@@ -223,6 +225,9 @@ def pretrain(
     start_iter=0,
     cumulative_tokens_start=0,
     eval_config=None,
+    num_visualize_generations=0,
+    loss_viz_config=None,
+    spectral_viz=False,
 ):
     """
     Main pretraining loop.
@@ -234,6 +239,7 @@ def pretrain(
       activations.json                 — activation memory statistics
       eval_results.json                — lm-eval results (only if --eval_config is provided)
       trainer_state.json               — copy of the run-level training log
+      loss_viz/                        — loss landscape plots (only if --loss-viz is set)
 
     trainer_state.json is also written at the run root after every checkpoint. It follows the
     same log_history schema as HuggingFace Trainer so tooling that reads HF checkpoints works.
@@ -276,7 +282,7 @@ def pretrain(
             torch.cuda.reset_peak_memory_stats(device)
 
         t0 = time.time()
-        _, loss = training_step(net, batch=batch, labels=labels)
+        _, loss, metadata = training_step(net, batch=batch, labels=labels)
         forward_time = time.time() - t0
 
         t1 = time.time()
@@ -308,7 +314,7 @@ def pretrain(
 
         total_activation_mem = sum(activation_stats.values())
 
-        wandb.log({
+        wandb_log = {
             "lm_loss": loss.item(),
             "train_perplexity": train_ppl,
             "learning_rate": current_lr,
@@ -321,7 +327,11 @@ def pretrain(
             "activations_VRAM_MB": total_activation_mem,
             "allocated_VRAM_MB": allocated_mem,
             "peak_allocated_VRAM_MB": peak_mem,
-        }, step=i)
+        }
+        for k, v in metadata.items():
+            if k.startswith("metrics/model/"):
+                wandb_log["model/" + k[len("metrics/model/"):]] = v
+        wandb.log(wandb_log, step=i)
 
         if profiler is not None:
             profiler.step()
@@ -377,6 +387,72 @@ def pretrain(
                 print(f"[iter {i}] lm-eval saved → {checkpoint_dir}/eval_results.json")
 
             plot_visualizations(net, os.path.join(run_dir, "visualizations"), i)
+
+            if num_visualize_generations > 0 and tokenizer is not None:
+                viz_batch, _ = next(iter(val_dataloader))
+                viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
+                viz_prompt = tokenizer.decode(viz_prompt_tokens)
+                net.eval()
+                _, hidden_states_per_step = generate(
+                    viz_prompt, tokenizer, net, device,
+                    max_output_length=num_visualize_generations,
+                    generation_folder="", checkpoint_path="", tokenizer_path="",
+                    collect_hidden_states=True,
+                )
+                net.train()
+
+                if hidden_states_per_step:
+                    from hyperviz import Visualizer
+                    from hyperviz.trajectory import Trajectory
+                    viz_dir = os.path.join(checkpoint_dir, "viz")
+                    visualizer = Visualizer(viz_dir)
+                    for step_hs in hidden_states_per_step:
+                        if step_hs is not None:
+                            visualizer.add(Trajectory(hidden_states=step_hs))
+                    visualizer.visualize()
+                    visualizer.clear()
+                    print(f"[iter {i}] hyperviz → {viz_dir}")
+
+            if loss_viz_config is not None:
+                from hyperviz.loss_visualizer import LossVisualizer
+
+                class _LMCriterion(nn.Module):
+                    """Unwraps LMOutput and reshapes (B,T,V) logits for cross_entropy."""
+                    def forward(self, output, targets):
+                        logits = output.logits if hasattr(output, "logits") else output
+                        if logits.dim() == 3:
+                            B, T, V = logits.shape
+                            logits = logits.view(B * T, V)
+                            targets = targets.view(B * T)
+                        return F.cross_entropy(logits, targets)
+
+                loss_viz_dir = os.path.join(checkpoint_dir, "viz")
+                loss_visualizer = LossVisualizer(
+                    save_directory=loss_viz_dir,
+                    criterion=_LMCriterion(),
+                    grid_points=loss_viz_config.get("grid_points", 20),
+                    grid_range=loss_viz_config.get("grid_range", 1.0),
+                    eval_batches=loss_viz_config.get("eval_batches", 50),
+                    save_interactive_visualization=loss_viz_config.get("interactive", False),
+                )
+                activation_stats.clear()
+                net.eval()
+                loss_visualizer.visualize(net, val_dataloader, device)
+                del loss_visualizer
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                net.train()
+                print(f"[iter {i}] loss landscape → {loss_viz_dir}")
+
+            if spectral_viz:
+                from hyperviz.spectral_visualizer import SpectralVisualizer
+                spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
+                sv = SpectralVisualizer(save_directory=spectral_viz_dir)
+                net.eval()
+                with torch.no_grad():
+                    sv.visualize(net)
+                net.train()
+                print(f"[iter {i}] spectral viz → {spectral_viz_dir}/spectral_values/")
 
             log_history.append({
                 "step": i,
@@ -440,6 +516,28 @@ def main():
                              "The latest checkpoint-{N} inside it will be loaded automatically.")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose dataset output")
+    parser.add_argument("--num-visualize-generations", type=int, default=0,
+                        help="Number of tokens to generate per checkpoint for hyperviz analysis. "
+                             "0 = disabled. When set, hidden states are collected during generation "
+                             "and saved to {checkpoint}/viz/.")
+    parser.add_argument("--loss-viz", action="store_true",
+                        help="Enable loss landscape visualization at every checkpoint. "
+                             "Saves 3D surface, 2D contour, and 1D slice plots to "
+                             "{checkpoint}/loss_viz/ using filter-normalized random directions.")
+    parser.add_argument("--loss-viz-grid-points", type=int, default=20,
+                        help="Grid resolution for loss landscape sweep (N×N). Default: 20.")
+    parser.add_argument("--loss-viz-grid-range", type=float, default=1.0,
+                        help="α and β are swept over [-range, +range]. Default: 1.0.")
+    parser.add_argument("--loss-viz-eval-batches", type=int, default=50,
+                        help="Validation batches used to estimate loss at each grid point. Default: 50.")
+    parser.add_argument("--loss-viz-interactive", action="store_true",
+                        help="Also save an interactive 3D HTML file (requires plotly).")
+    parser.add_argument("--val-batch-size", type=int, default=None,
+                        help="Batch size for validation. Defaults to the training batch size.")
+    parser.add_argument("--spectral-viz", action="store_true",
+                        help="Compute and save singular-value distributions for all 2-D weight "
+                             "matrices at every checkpoint. Saves plots to "
+                             "{checkpoint}/viz/spectral_values/.")
 
     args = parser.parse_args()
 
@@ -453,6 +551,15 @@ def main():
     if args.eval_config:
         assert os.path.exists(args.eval_config), f"Eval config not found: {args.eval_config}"
         eval_config = load_config(args.eval_config, "parameters")
+
+    loss_viz_config = None
+    if args.loss_viz:
+        loss_viz_config = {
+            "grid_points": args.loss_viz_grid_points,
+            "grid_range":  args.loss_viz_grid_range,
+            "eval_batches": args.loss_viz_eval_batches,
+            "interactive":  args.loss_viz_interactive,
+        }
 
     if args.load:
         assert os.path.exists(args.load), f"Run directory not found: {args.load}"
@@ -492,7 +599,8 @@ def main():
 
     val_dataset = load_dataset(conf["validation_data_config"], conf["validation_sequence_length"],
                                debug=args.verbose, val=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=conf["batch_size"],
+    val_batch_size = args.val_batch_size if args.val_batch_size is not None else conf["batch_size"]
+    val_dataloader = DataLoader(val_dataset, batch_size=val_batch_size,
                                 shuffle=True, num_workers=conf["num_workers"])
 
     optim = load_optimizer(net, **conf["optimizer"])
@@ -554,6 +662,9 @@ def main():
         start_iter=start_iter,
         cumulative_tokens_start=cumulative_tokens_start,
         eval_config=eval_config,
+        num_visualize_generations=args.num_visualize_generations,
+        loss_viz_config=loss_viz_config,
+        spectral_viz=args.spectral_viz,
     )
 
 

@@ -3,7 +3,7 @@ import yaml
 
 
 def load_config(config_path: str, base_attr=None):
-    assert os.path.exists(config_path)
+    assert os.path.exists(config_path), f"Missing config path {config_path}"
     assert os.path.isfile(config_path)
     assert config_path.endswith(".yaml")
 

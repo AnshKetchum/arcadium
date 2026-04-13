@@ -73,6 +73,7 @@ dependencies = [
     "peft==0.17.1",
     "pillow==11.3.0",
     "platformdirs==4.4.0",
+    "plotly>=6.7.0",
     "portalocker==3.2.0",
     "propcache==0.3.2",
     "protobuf==6.32.0",

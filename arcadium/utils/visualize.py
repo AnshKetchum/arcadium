@@ -15,25 +15,25 @@ def plot_visualizations(net: torch.nn.Module, ckpt_dir: str, iter_num: int):
     vis_dir = os.path.join(ckpt_dir, f"attn_maps_iter{iter_num}")
     os.makedirs(vis_dir, exist_ok=True)
 
-    for i, metadata in enumerate(net.metadata()):
-        if not metadata or "attention_probabilities" not in metadata:
-            continue
+    # for i, metadata in enumerate(net.metadata()):
+    #     if not metadata or "attention_probabilities" not in metadata:
+    #         continue
 
-        attn_probs = metadata["attention_probabilities"]  # [B, N, T, T]
-        B, N, T, _ = attn_probs.shape
+    #     attn_probs = metadata["attention_probabilities"]  # [B, N, T, T]
+    #     B, N, T, _ = attn_probs.shape
 
-        probs = attn_probs[0].detach().cpu()  # [N, T, T]
+    #     probs = attn_probs[0].detach().cpu()  # [N, T, T]
 
-        for head in range(N):
-            plt.figure(figsize=(6, 5))
-            plt.imshow(probs[head], cmap="viridis", aspect="auto")
-            plt.colorbar()
-            plt.title(f"Layer {i} - Head {head}")
-            plt.xlabel("Key positions")
-            plt.ylabel("Query positions")
+    #     for head in range(N):
+    #         plt.figure(figsize=(6, 5))
+    #         plt.imshow(probs[head], cmap="viridis", aspect="auto")
+    #         plt.colorbar()
+    #         plt.title(f"Layer {i} - Head {head}")
+    #         plt.xlabel("Key positions")
+    #         plt.ylabel("Query positions")
 
-            out_path = os.path.join(vis_dir, f"layer{i}_head{head}.png")
-            plt.savefig(out_path, bbox_inches="tight")
-            plt.close()
+    #         out_path = os.path.join(vis_dir, f"layer{i}_head{head}.png")
+    #         plt.savefig(out_path, bbox_inches="tight")
+    #         plt.close()
 
     print(f"[iter {iter_num}] Saved attention visualizations to {vis_dir}")

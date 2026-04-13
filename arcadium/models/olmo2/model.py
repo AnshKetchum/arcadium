@@ -95,6 +95,10 @@ class OLMo2(PreTrainedModel):
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.post_init()
 
+    @property
+    def vocab_size(self):
+        return self.config.vocab_size
+
     def get_input_embeddings(self):
         return self.embedding
 

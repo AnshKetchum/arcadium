@@ -12,8 +12,8 @@ parameters:
     lr: 0.001                  # decreased from 0.001
   training_sequence_length:
     start: 32
-    end: 1024
+    end: 32 
     steps: 500
-  validation_sequence_length: 256
+  validation_sequence_length: 32
   training_data_config: "configs/data/simple-corpus-basic.yaml"
   validation_data_config: "configs/data/simple-corpus-basic.yaml"
