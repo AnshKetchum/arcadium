@@ -27,6 +27,9 @@ from torchinfo import summary
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
 
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 load_dotenv()
 
 
@@ -228,6 +231,7 @@ def pretrain(
     num_visualize_generations=0,
     loss_viz_config=None,
     spectral_viz=False,
+    local_rank=0,
 ):
     """
     Main pretraining loop.
@@ -331,16 +335,18 @@ def pretrain(
         for k, v in metadata.items():
             if k.startswith("metrics/model/"):
                 wandb_log["model/" + k[len("metrics/model/"):]] = v
-        wandb.log(wandb_log, step=i)
+        if local_rank == 0:
+            wandb.log(wandb_log, step=i)
 
         if profiler is not None:
             profiler.step()
 
-        if i % checkpoint_frequency == 0 or i == num_iters - 1:
+        if local_rank == 0 and (i % checkpoint_frequency == 0 or i == num_iters - 1):
             checkpoint_dir = os.path.join(run_dir, f"checkpoint-{i}")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-            net.save_pretrained(checkpoint_dir, safe_serialization=True)
+            raw_net = net.module if isinstance(net, DDP) else net
+            raw_net.save_pretrained(checkpoint_dir, safe_serialization=True)
 
             if tokenizer is not None:
                 tokenizer.save_pretrained(checkpoint_dir)
@@ -352,7 +358,7 @@ def pretrain(
                 json.dump(dict(activation_stats), f)
 
             avg_val_loss, avg_val_ppl = run_validation(
-                net, tokenizer, val_dataloader, device,
+                raw_net, tokenizer, val_dataloader, device,
                 run_dir=run_dir, max_steps=num_val_iters, step=i,
             )
             net.train()
@@ -361,8 +367,8 @@ def pretrain(
             if eval_config is not None and tokenizer is not None:
                 num_runs = int(eval_config.get("num_runs", 1))
                 print(f"[iter {i}] Running lm-eval ({num_runs} run(s)): {eval_config['tasks']}")
-                net.eval()
-                eval_results = run_lm_eval(net, tokenizer, eval_config, device)
+                raw_net.eval()
+                eval_results = run_lm_eval(raw_net, tokenizer, eval_config, device)
                 net.train()
                 eval_out = {
                     "iter": i,
@@ -386,15 +392,15 @@ def pretrain(
                 wandb.log(wandb_metrics, step=i)
                 print(f"[iter {i}] lm-eval saved → {checkpoint_dir}/eval_results.json")
 
-            plot_visualizations(net, os.path.join(run_dir, "visualizations"), i)
+            plot_visualizations(raw_net, os.path.join(run_dir, "visualizations"), i)
 
             if num_visualize_generations > 0 and tokenizer is not None:
                 viz_batch, _ = next(iter(val_dataloader))
                 viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
                 viz_prompt = tokenizer.decode(viz_prompt_tokens)
-                net.eval()
+                raw_net.eval()
                 _, hidden_states_per_step = generate(
-                    viz_prompt, tokenizer, net, device,
+                    viz_prompt, tokenizer, raw_net, device,
                     max_output_length=num_visualize_generations,
                     generation_folder="", checkpoint_path="", tokenizer_path="",
                     collect_hidden_states=True,
@@ -436,8 +442,8 @@ def pretrain(
                     save_interactive_visualization=loss_viz_config.get("interactive", False),
                 )
                 activation_stats.clear()
-                net.eval()
-                loss_visualizer.visualize(net, val_dataloader, device)
+                raw_net.eval()
+                loss_visualizer.visualize(raw_net, val_dataloader, device)
                 del loss_visualizer
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -448,9 +454,9 @@ def pretrain(
                 from hyperviz.spectral_visualizer import SpectralVisualizer
                 spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
                 sv = SpectralVisualizer(save_directory=spectral_viz_dir)
-                net.eval()
+                raw_net.eval()
                 with torch.no_grad():
-                    sv.visualize(net)
+                    sv.visualize(raw_net)
                 net.train()
                 print(f"[iter {i}] spectral viz → {spectral_viz_dir}/spectral_values/")
 
@@ -490,6 +496,19 @@ def pretrain(
     if profiler is not None:
         profiler.stop()
 
+def setup(rank, world_size): 
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # We want to be able to train our model on an `accelerator <https://pytorch.org/docs/stable/torch.html#accelerators>`__
+    # such as CUDA, MPS, MTIA, or XPU.
+    acc = torch.accelerator.current_accelerator()
+    backend = torch.distributed.get_default_backend_for_device(acc)
+    # initialize the process group
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -514,6 +533,9 @@ def main():
     parser.add_argument("--load", type=str, default=None,
                         help="Path to an existing run directory to resume training from. "
                              "The latest checkpoint-{N} inside it will be loaded automatically.")
+    parser.add_argument("--base-run-dir", type=str, default="checkpoints",
+                        help="Base directory under which new run folders are created. "
+                             "Default: checkpoints/")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose dataset output")
     parser.add_argument("--num-visualize-generations", type=int, default=0,
@@ -538,6 +560,12 @@ def main():
                         help="Compute and save singular-value distributions for all 2-D weight "
                              "matrices at every checkpoint. Saves plots to "
                              "{checkpoint}/viz/spectral_values/.")
+
+    parallel_group = parser.add_argument_group("parallelism")
+    parallel_group.add_argument("--num-dp-ranks", type=int, default=0,
+                                help="Number of ranks for DistributedDataParallel. "
+                                     "0 = disabled (single-process). When >0, launch with "
+                                     "`torchrun --nproc-per-node=<N>`.")
 
     args = parser.parse_args()
 
@@ -566,7 +594,7 @@ def main():
         run_dir = args.load
     else:
         run_name = f"{conf['experiment_name']}-{time.strftime('%Y-%m-%d-%H-%M-%S')}"
-        run_dir = os.path.join("checkpoints", run_name)
+        run_dir = os.path.join(args.base_run_dir, run_name)
         os.makedirs(run_dir, exist_ok=True)
         for path in [args.model_config, args.training_config,
                      conf["training_data_config"], conf["validation_data_config"]]:
@@ -576,7 +604,14 @@ def main():
         if args.eval_config:
             shutil.copy(args.eval_config, run_dir)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_ddp = args.num_dp_ranks > 0
+    local_rank = 0
+    if use_ddp:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        setup(rank=local_rank, world_size=args.num_dp_ranks)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     name, _, net, tokenizer = load_language_model(args.model_config, device)
     assert net.vocab_size >= len(tokenizer), (
@@ -584,7 +619,11 @@ def main():
     )
 
     x = torch.zeros((1, conf["sequence_length"]), dtype=torch.long, device=device)
-    summary(net, input_data=x)
+    if local_rank == 0:
+        summary(net, input_data=x)
+
+    if use_ddp:
+        net = DDP(net, device_ids=[local_rank])
 
     train_seq = conf["training_sequence_length"]
     train_dataset = load_dataset(conf["training_data_config"], train_seq["start"],
@@ -626,23 +665,25 @@ def main():
         else:
             print(f"No checkpoint found in {run_dir}, starting from scratch.")
 
-    wandb.init(
-        project=conf["experiment_name"],
-        name=f"{conf['experiment_name']}{resume_info}",
-        config={
-            "model": name,
-            "batch_size": conf["batch_size"],
-            "sequence_length": conf["sequence_length"],
-            "lr": conf["lr"],
-            "num_iters": conf["epochs"],
-            "warmup_steps": warmup_steps,
-            "min_lr_ratio": min_lr_ratio,
-            "profile_steps": args.profile,
-            "resumed": args.load is not None,
-            "start_iter": start_iter,
-        },
-    )
-    wandb.watch(net, log="all", log_freq=100)
+    if local_rank == 0:
+        wandb.init(
+            project=conf["experiment_name"],
+            name=f"{conf['experiment_name']}{resume_info}",
+            config={
+                "model": name,
+                "batch_size": conf["batch_size"],
+                "sequence_length": conf["sequence_length"],
+                "lr": conf["lr"],
+                "num_iters": conf["epochs"],
+                "warmup_steps": warmup_steps,
+                "min_lr_ratio": min_lr_ratio,
+                "profile_steps": args.profile,
+                "resumed": args.load is not None,
+                "start_iter": start_iter,
+                "num_dp_ranks": args.num_dp_ranks,
+            },
+        )
+        wandb.watch(net, log="all", log_freq=100)
 
     pretrain(
         net=net,
@@ -665,7 +706,11 @@ def main():
         num_visualize_generations=args.num_visualize_generations,
         loss_viz_config=loss_viz_config,
         spectral_viz=args.spectral_viz,
+        local_rank=local_rank,
     )
+
+    if use_ddp:
+        cleanup()
 
 
 if __name__ == "__main__":

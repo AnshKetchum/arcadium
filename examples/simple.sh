@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # run from the project root:  bash examples/simple.sh
+export CUDA_VISIBLE_DEVICES=0
+export BASE_RUN_DIR="checkpoints"
 
 # Define model args
 MODEL_ARGS=(
@@ -27,13 +29,26 @@ EVAL_ARGS=(
 #   --eval_config configs/eval/basic.yaml
 )
 
+NUM_DP_RANKS=${NUM_DP_RANKS:-1}
+
+PARALLELISM_ARGS=(
+  --num-dp-ranks "${NUM_DP_RANKS}"
+)
+
+RUN_DIR_ARGS=(
+  --base-run-dir "${BASE_RUN_DIR}"
+)
+
 # Generate timestamp
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 # Run training with both sets of args
-python -m arcadium.tasks.language.pretrain \
+torchrun --nproc-per-node="${NUM_DP_RANKS}" \
+  -m arcadium.tasks.language.pretrain \
   "${MODEL_ARGS[@]}" \
   "${DATA_ARGS[@]}" \
   "${VIS_ARGS[@]}" \
-  "${EVAL_ARGS[@]}" | tee "logs/out_${TIMESTAMP}.log"
+  "${EVAL_ARGS[@]}" \
+  "${PARALLELISM_ARGS[@]}" \
+  "${RUN_DIR_ARGS[@]}" | tee "logs/out_${TIMESTAMP}.log"
   
