@@ -1,0 +1,2 @@
+parameters:
+  model_name_or_path: "tokenizers/bpe-32768"
