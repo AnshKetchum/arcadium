@@ -12,3 +12,8 @@ class LMOutput(ModelOutput):
     probs: Optional[torch.Tensor] = None
     auxiliary_loss: Optional[torch.Tensor] = None
     metadata: Optional[dict] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.metadata is None:
+            self.metadata = {}

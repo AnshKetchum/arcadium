@@ -17,13 +17,13 @@ def load_optimizer(net, name = "adam", **kwargs):
     name = (name or "adam").lower()
 
     if name == "adam":
-        lr = kwargs.get("lr", 3e-4)
-        weight_decay = kwargs.get("weight_decay", 0)
+        lr = float(kwargs.get("lr", 3e-4))
+        weight_decay = float(kwargs.get("weight_decay", 0))
         return Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
 
     if name == "muon":
-        lr = kwargs.get("lr", 3e-4)
-        weight_decay = kwargs.get("weight_decay", 0)
+        lr = float(kwargs.get("lr", 3e-4))
+        weight_decay = float(kwargs.get("weight_decay", 0))
         return SingleDeviceMuon(net.parameters(), lr=lr, weight_decay=weight_decay)
 
     if name in ("muon+adam", "muon_with_aux_adam", "muon_aux", "muon_and_adam"):

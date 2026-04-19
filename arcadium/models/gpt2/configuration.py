@@ -14,7 +14,7 @@ class GPT2Config(PretrainedConfig):
         mlp_expansion_factor: float = 4.0,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(tie_word_embeddings=False, **kwargs)
         self.n_blocks = n_blocks
         self.d_model = d_model
         self.n_heads = n_heads

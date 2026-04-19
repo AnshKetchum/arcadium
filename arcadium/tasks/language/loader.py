@@ -57,6 +57,10 @@ def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:
     if architecture == "universal_transformer":
         from arcadium.models.universal_transformer import UniversalTransformer, UniversalTransformerConfig
         return UniversalTransformer(UniversalTransformerConfig(**cfg))
+    
+    if architecture == "qwen3":
+        from arcadium.models.qwen3 import Qwen3, Qwen3Config
+        return Qwen3(Qwen3Config(**cfg))
 
     if architecture in ("dense", "moe"):
         from arcadium.components.attentions import AttentionParameters

@@ -1,0 +1,19 @@
+parameters:
+  experiment_name: "universal-transformer"
+  epochs: 1000
+  val_steps: 10
+  checkpoint_frequency: 100
+  batch_size: 4
+  num_workers: 0
+  sequence_length: 4096
+  lr: 0.001
+  optimizer:
+    name: "adam"
+    lr: 0.001                  # decreased from 0.001
+  training_sequence_length:
+    start: 512
+    end: 4096
+    steps: 500
+  validation_sequence_length: 4096
+  training_data_config: "configs/data/fineweb.yaml"
+  validation_data_config: "configs/data/fineweb.yaml"

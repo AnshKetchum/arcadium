@@ -1,0 +1,5 @@
+parameters:
+  name: "fineweb-gpt"
+  architecture_config: "arcadium/models/gpt2/configs/gpt2-fineweb.yaml"
+  tokenizer:
+    config: configs/tokenizer/gpt-2.yaml

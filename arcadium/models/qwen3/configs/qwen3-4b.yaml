@@ -1,0 +1,11 @@
+architecture: qwen3
+n_blocks: 36
+d_model: 2560
+n_query_heads: 32
+n_kv_heads: 8
+vocab_size: 151936
+max_sequence_length: 32768
+mlp_expansion_factor: 2.667
+rope_base: 1000000
+yarn_scale: 1.0
+yarn_original_max_len: 32768

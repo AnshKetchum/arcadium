@@ -1,5 +1,0 @@
-parameters:
-  name: "tiny-dense-512d-16l-mha-gpt2tok"
-  architecture_config: arcadium/arcadium/models/dense/configs/tiny-dense-512d-16l-mha.yaml
-  tokenizer:
-    config: configs/tokenizer/gpt-2.yaml

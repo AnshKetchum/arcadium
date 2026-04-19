@@ -15,9 +15,11 @@ class Qwen3Config(PretrainedConfig):
         mlp_expansion_factor: float = 4.0,
         sliding_window_ratio: float = 3.0,
         rope_base: int = 10000,
+        yarn_scale: float = 1.0,
+        yarn_original_max_len: int = 4096,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(tie_word_embeddings=False, **kwargs)
         self.n_blocks = n_blocks
         self.d_model = d_model
         self.n_query_heads = n_query_heads
@@ -27,6 +29,8 @@ class Qwen3Config(PretrainedConfig):
         self.mlp_expansion_factor = mlp_expansion_factor
         self.sliding_window_ratio = sliding_window_ratio
         self.rope_base = rope_base
+        self.yarn_scale = yarn_scale
+        self.yarn_original_max_len = yarn_original_max_len
 
 
 # standard size presets (approximate OLMo2 paper configs)

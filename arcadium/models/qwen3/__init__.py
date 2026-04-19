@@ -1,2 +1,2 @@
-from .model import OLMo2
-from .configuration import OLMo2Config, olmo2_1b, olmo2_7b, olmo2_13b
+from .model import Qwen3
+from .configuration import Qwen3Config, Qwen3_1b, Qwen3_7b, Qwen3_13b

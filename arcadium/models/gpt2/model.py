@@ -95,9 +95,13 @@ class GPT2(PreTrainedModel):
         B, T = input_ids.shape
         positions = torch.arange(T, device=input_ids.device)
 
+        hidden_states = []
         h = self.embedding(input_ids) + self.positional_embedding(positions)
         for block in self.blocks:
             h = block(h, mask)
+            if h is not None: 
+                hidden_states.append(h.detach().float().cpu())
+                
         logits = self.lm_head(self.final_norm(h))
 
         loss = None
@@ -106,5 +110,9 @@ class GPT2(PreTrainedModel):
                 logits[:, :-1, :].contiguous().view(-1, self.config.vocab_size),
                 labels[:, 1:].contiguous().view(-1),
             )
+        
+        metadata = {
+            "hidden_states": hidden_states,
+        }
 
-        return LMOutput(loss=loss, logits=logits)
+        return LMOutput(loss=loss, logits=logits, metadata=metadata)

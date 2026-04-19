@@ -25,6 +25,7 @@ from arcadium.tasks.language.generate import generate
 from dotenv import load_dotenv
 from torchinfo import summary
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import LambdaLR
 
 import torch.distributed as dist
@@ -69,8 +70,9 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler):
     Restore model weights from safetensors and optimizer/scheduler from .pt files.
     Returns the trainer_state dict (used to recover cumulative_tokens etc.), or {}.
     """
+    raw_net = net.module if isinstance(net, DDP) else net
     weights_path = os.path.join(checkpoint_dir, "model.safetensors")
-    net.load_state_dict(load_file(weights_path))
+    raw_net.load_state_dict(load_file(weights_path))
 
     for fname, obj in [("optimizer.pt", optim), ("scheduler.pt", scheduler)]:
         path = os.path.join(checkpoint_dir, fname)
@@ -232,6 +234,7 @@ def pretrain(
     loss_viz_config=None,
     spectral_viz=False,
     local_rank=0,
+    resumed=False,
 ):
     """
     Main pretraining loop.
@@ -269,6 +272,7 @@ def pretrain(
     cumulative_tokens = cumulative_tokens_start
     log_history = []
 
+    print(f"Training started: iters {start_iter} → {num_iters}, device={device}" + (" (resumed)" if resumed else ""))
     for i in range(start_iter, num_iters):
         optim.zero_grad()
 
@@ -294,6 +298,7 @@ def pretrain(
         backward_time = time.time() - t1
 
         t2 = time.time()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
         optim.step()
         scheduler.step()
         optimizer_time = time.time() - t2
@@ -332,6 +337,7 @@ def pretrain(
             "allocated_VRAM_MB": allocated_mem,
             "peak_allocated_VRAM_MB": peak_mem,
         }
+
         for k, v in metadata.items():
             if k.startswith("metrics/model/"):
                 wandb_log["model/" + k[len("metrics/model/"):]] = v
@@ -392,9 +398,11 @@ def pretrain(
                 wandb.log(wandb_metrics, step=i)
                 print(f"[iter {i}] lm-eval saved → {checkpoint_dir}/eval_results.json")
 
-            plot_visualizations(raw_net, os.path.join(run_dir, "visualizations"), i)
+            skip_viz = resumed and i == start_iter
+            if not skip_viz:
+                plot_visualizations(raw_net, os.path.join(run_dir, "visualizations"), i)
 
-            if num_visualize_generations > 0 and tokenizer is not None:
+            if not skip_viz and num_visualize_generations > 0 and tokenizer is not None:
                 viz_batch, _ = next(iter(val_dataloader))
                 viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
                 viz_prompt = tokenizer.decode(viz_prompt_tokens)
@@ -419,7 +427,7 @@ def pretrain(
                     visualizer.clear()
                     print(f"[iter {i}] hyperviz → {viz_dir}")
 
-            if loss_viz_config is not None:
+            if not skip_viz and loss_viz_config is not None:
                 from hyperviz.loss_visualizer import LossVisualizer
 
                 class _LMCriterion(nn.Module):
@@ -450,7 +458,7 @@ def pretrain(
                 net.train()
                 print(f"[iter {i}] loss landscape → {loss_viz_dir}")
 
-            if spectral_viz:
+            if not skip_viz and spectral_viz:
                 from hyperviz.spectral_visualizer import SpectralVisualizer
                 spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
                 sv = SpectralVisualizer(save_directory=spectral_viz_dir)
@@ -496,16 +504,10 @@ def pretrain(
     if profiler is not None:
         profiler.stop()
 
-def setup(rank, world_size): 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    # We want to be able to train our model on an `accelerator <https://pytorch.org/docs/stable/torch.html#accelerators>`__
-    # such as CUDA, MPS, MTIA, or XPU.
+def setup():
     acc = torch.accelerator.current_accelerator()
     backend = torch.distributed.get_default_backend_for_device(acc)
-    # initialize the process group
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    dist.init_process_group(backend)
 
 def cleanup():
     dist.destroy_process_group()
@@ -533,6 +535,9 @@ def main():
     parser.add_argument("--load", type=str, default=None,
                         help="Path to an existing run directory to resume training from. "
                              "The latest checkpoint-{N} inside it will be loaded automatically.")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Specific checkpoint subdirectory to load (e.g. checkpoint-800). "
+                             "Must be used with --load. Overrides auto-detection of the latest checkpoint.")
     parser.add_argument("--base-run-dir", type=str, default="checkpoints",
                         help="Base directory under which new run folders are created. "
                              "Default: checkpoints/")
@@ -608,7 +613,7 @@ def main():
     local_rank = 0
     if use_ddp:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        setup(rank=local_rank, world_size=args.num_dp_ranks)
+        setup()
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -628,13 +633,16 @@ def main():
     train_seq = conf["training_sequence_length"]
     train_dataset = load_dataset(conf["training_data_config"], train_seq["start"],
                                  debug=args.verbose, val=False)
-    seqlen_sampler = SequenceLengthSampler(
-        len(train_dataset), conf["batch_size"],
-        train_seq["start"], train_seq["end"], train_seq["steps"],
-        name="train_scheduler", shuffle=False,
-    )
+    if use_ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    else:
+        train_sampler = SequenceLengthSampler(
+            len(train_dataset), conf["batch_size"],
+            train_seq["start"], train_seq["end"], train_seq["steps"],
+            name="train_scheduler", shuffle=False,
+        )
     train_dataloader = DataLoader(train_dataset, batch_size=conf["batch_size"],
-                                  num_workers=conf["num_workers"], sampler=seqlen_sampler)
+                                  num_workers=conf["num_workers"], sampler=train_sampler)
 
     val_dataset = load_dataset(conf["validation_data_config"], conf["validation_sequence_length"],
                                debug=args.verbose, val=True)
@@ -654,7 +662,12 @@ def main():
     cumulative_tokens_start = 0
     resume_info = ""
     if args.load:
-        ckpt_dir, latest_iter = find_latest_checkpoint(run_dir)
+        if args.checkpoint:
+            ckpt_dir = os.path.join(run_dir, args.checkpoint)
+            assert os.path.isdir(ckpt_dir), f"Checkpoint not found: {ckpt_dir}"
+            latest_iter = int(re.search(r"checkpoint-(\d+)$", ckpt_dir).group(1))
+        else:
+            ckpt_dir, latest_iter = find_latest_checkpoint(run_dir)
         if ckpt_dir:
             state = load_checkpoint(ckpt_dir, net, optim, scheduler)
             start_iter = latest_iter + 1
@@ -666,6 +679,7 @@ def main():
             print(f"No checkpoint found in {run_dir}, starting from scratch.")
 
     if local_rank == 0:
+        assert os.getenv("WANDB_API_KEY", None), "Wandb API key is none"
         wandb.init(
             project=conf["experiment_name"],
             name=f"{conf['experiment_name']}{resume_info}",
@@ -707,6 +721,7 @@ def main():
         loss_viz_config=loss_viz_config,
         spectral_viz=args.spectral_viz,
         local_rank=local_rank,
+        resumed=args.load is not None and start_iter > 0,
     )
 
     if use_ddp:
