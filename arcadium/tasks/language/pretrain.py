@@ -606,7 +606,7 @@ def main():
         assert os.path.exists(args.load), f"Run directory not found: {args.load}"
         run_dir = args.load
     else:
-        run_name = f"{conf['experiment_name']}-{time.strftime('%Y-%m-%d-%H-%M-%S')}"
+        run_name = f"{conf['run_name']}-{time.strftime('%Y-%m-%d-%H-%M-%S')}"
         run_dir = os.path.join(args.base_run_dir, run_name)
         os.makedirs(run_dir, exist_ok=True)
         for path in [args.model_config, args.training_config,
@@ -690,7 +690,7 @@ def main():
         assert os.getenv("WANDB_API_KEY", None), "Wandb API key is none"
         wandb.init(
             project=conf["experiment_name"],
-            name=f"{conf['experiment_name']}{resume_info}",
+            name=f"{conf['run_name']}{resume_info}",
             config={
                 "model": name,
                 "batch_size": conf["batch_size"],

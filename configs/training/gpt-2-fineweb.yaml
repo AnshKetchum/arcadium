@@ -1,5 +1,6 @@
 parameters:
   experiment_name: "nanogpt-speedrun-ablations"
+  run_name: "speedrun-gpt2-100M"
   training_steps: 50000
   epochs: 2
   val_steps: 10

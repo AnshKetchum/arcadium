@@ -54,10 +54,10 @@ RUN_DIR_ARGS=(
 
 # To resume from a checkpoint, uncomment and set --load to the run directory.
 # The latest checkpoint-{N} inside it will be loaded automatically.
-RESUME_ARGS=(
-  --load checkpoints/nanogpt-speedrun-ablations-gpt2-2026-04-18-17-02-27
-  --checkpoint checkpoint-900 # omit to load the latest checkpoint automatically
-)
+# RESUME_ARGS=(
+#   --load checkpoints/nanogpt-speedrun-ablations-gpt2-2026-04-18-17-02-27
+#   --checkpoint checkpoint-900 # omit to load the latest checkpoint automatically
+# )
 
 # Generate timestamp
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")

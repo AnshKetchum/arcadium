@@ -12,9 +12,10 @@ class GPT2Config(PretrainedConfig):
         vocab_size: int = 50257,
         max_sequence_length: int = 1024,
         mlp_expansion_factor: float = 4.0,
+        tie_word_embeddings: bool = False,
         **kwargs,
     ):
-        super().__init__(tie_word_embeddings=False, **kwargs)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.n_blocks = n_blocks
         self.d_model = d_model
         self.n_heads = n_heads

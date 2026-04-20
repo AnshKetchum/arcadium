@@ -72,7 +72,12 @@ class GPT2(PreTrainedModel):
             for _ in range(config.n_blocks)
         ])
         self.final_norm = nn.LayerNorm(config.d_model)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        if config.tie_word_embeddings:
+            self.lm_head = self.embedding.weight
+            self._tied_weights_keys = ["lm_head"]
+        else:
+            self.lm_head = nn.Parameter(torch.empty(config.vocab_size, config.d_model))
+            nn.init.normal_(self.lm_head, std=config.d_model ** -0.5)
         self.post_init()
 
     @property
@@ -102,7 +107,7 @@ class GPT2(PreTrainedModel):
             if h is not None: 
                 hidden_states.append(h.detach().float().cpu())
                 
-        logits = self.lm_head(self.final_norm(h))
+        logits = F.linear(self.final_norm(h), self.lm_head)
 
         loss = None
         if labels is not None:
