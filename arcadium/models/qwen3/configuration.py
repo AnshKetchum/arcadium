@@ -17,9 +17,10 @@ class Qwen3Config(PretrainedConfig):
         rope_base: int = 10000,
         yarn_scale: float = 1.0,
         yarn_original_max_len: int = 4096,
+        tie_word_embeddings: bool = False,
         **kwargs,
     ):
-        super().__init__(tie_word_embeddings=False, **kwargs)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.n_blocks = n_blocks
         self.d_model = d_model
         self.n_query_heads = n_query_heads

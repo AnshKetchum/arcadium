@@ -1,6 +1,7 @@
 parameters:
   experiment_name: "nanogpt-speedrun-ablations"
-  epochs: 50000
+  training_steps: 50000
+  epochs: 2
   val_steps: 10
   checkpoint_frequency: 1000  # keeping as requested
   batch_size: 32              # increased from 8

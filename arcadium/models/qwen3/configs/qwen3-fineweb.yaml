@@ -1,11 +1,12 @@
 architecture: qwen3
-n_blocks: 5
+n_blocks: 4
 d_model: 1024
 n_query_heads: 16
-n_kv_heads: 8
+n_kv_heads: 4
 vocab_size: 151936
 max_sequence_length: 32768
 mlp_expansion_factor: 3
 rope_base: 1000000
 yarn_scale: 1.0
 yarn_original_max_len: 32768
+tie_word_embeddings: True

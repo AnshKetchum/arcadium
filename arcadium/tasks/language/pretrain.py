@@ -76,6 +76,7 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler):
 
     for fname, obj in [("optimizer.pt", optim), ("scheduler.pt", scheduler)]:
         path = os.path.join(checkpoint_dir, fname)
+        print(f"Attempting to load {path}")
         if os.path.exists(path):
             obj.load_state_dict(torch.load(path, map_location="cpu"))
 
@@ -221,6 +222,7 @@ def pretrain(
     scheduler,
     device,
     num_iters=10,
+    num_epochs=1,
     num_val_iters=10,
     checkpoint_frequency=5,
     experiment_name=None,
@@ -254,6 +256,7 @@ def pretrain(
     net = net.to(device)
     net.train()
     data_iterator = iter(train_dataloader)
+    current_epoch = 0
 
     profiler = None
     if profile_steps > 0:
@@ -280,8 +283,13 @@ def pretrain(
         try:
             batch, labels = next(data_iterator)
         except StopIteration:
-            print(f"Data exhausted at step {i}.")
-            break
+            current_epoch += 1
+            if current_epoch >= num_epochs:
+                print(f"Data exhausted after {current_epoch} epoch(s) at step {i}.")
+                break
+            print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
+            data_iterator = iter(train_dataloader)
+            batch, labels = next(data_iterator)
         batch_load_time = time.time() - t_batch
 
         batch, labels = batch.to(device), labels.to(device)
@@ -651,11 +659,11 @@ def main():
                                 shuffle=True, num_workers=conf["num_workers"])
 
     optim = load_optimizer(net, **conf["optimizer"])
-    warmup_steps = conf.get("warmup_steps", min(2000, conf["epochs"] // 20))
+    warmup_steps = conf.get("warmup_steps", min(2000, conf["training_steps"] // 20))
     min_lr_ratio = conf.get("min_lr_ratio", 0.01)
     scheduler = LambdaLR(
         optim,
-        lambda step: cosine_warmup_lr_lambda(step, warmup_steps, conf["epochs"], min_lr_ratio),
+        lambda step: cosine_warmup_lr_lambda(step, warmup_steps, conf["training_steps"], min_lr_ratio),
     )
 
     start_iter = 0
@@ -688,7 +696,8 @@ def main():
                 "batch_size": conf["batch_size"],
                 "sequence_length": conf["sequence_length"],
                 "lr": conf["lr"],
-                "num_iters": conf["epochs"],
+                "num_iters": conf["training_steps"],
+                "epochs": conf.get("epochs", 1),
                 "warmup_steps": warmup_steps,
                 "min_lr_ratio": min_lr_ratio,
                 "profile_steps": args.profile,
@@ -707,7 +716,8 @@ def main():
         optim=optim,
         scheduler=scheduler,
         device=device,
-        num_iters=conf["epochs"],
+        num_iters=conf["training_steps"],
+        num_epochs=conf.get("epochs", 1),
         num_val_iters=conf["val_steps"],
         checkpoint_frequency=conf["checkpoint_frequency"],
         experiment_name=conf["experiment_name"],
