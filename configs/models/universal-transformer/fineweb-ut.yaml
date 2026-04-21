@@ -1,0 +1,5 @@
+parameters:
+  name: "tiny-universal-transformer"
+  architecture_config: "arcadium/models/universal_transformer/configs/universal-transformer-fineweb.yaml"
+  tokenizer:
+    config: configs/tokenizer/gpt-2.yaml

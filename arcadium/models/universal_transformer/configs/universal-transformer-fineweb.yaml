@@ -1,0 +1,10 @@
+architecture: universal_transformer
+d_model: 1024
+n_heads: 4
+d_ff: 3
+max_steps: 4
+n_blocks: 1
+eps: 0.01
+tau: 0.01
+dropout: 0.1
+max_sequence_length: 1024
