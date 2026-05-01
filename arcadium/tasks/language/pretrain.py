@@ -188,7 +188,7 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
     with torch.no_grad():
         for _ in tqdm(range(max_steps), desc="Validation"):
             try:
-                batch, labels = next(val_iterator)
+                batch, labels, _ = next(val_iterator)
             except StopIteration:
                 break
             batch, labels = batch.to(device), labels.to(device)
@@ -203,7 +203,7 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
     generations = []
     for gen_idx in range(3):
         try:
-            val_batch, _ = next(val_iterator)
+            val_batch, _, _ = next(val_iterator)
         except StopIteration:
             break
         prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
@@ -246,6 +246,7 @@ def pretrain(
     profile_steps=0,
     start_iter=0,
     cumulative_tokens_start=0,
+    source_tokens_start=None,
     eval_config=None,
     num_visualize_generations=0,
     loss_viz_config=None,
@@ -291,13 +292,19 @@ def pretrain(
     cumulative_tokens = cumulative_tokens_start
     log_history = []
 
+    _source_names: list[str] = getattr(train_dataloader.dataset, "_names", [])
+    _per_source_tokens: dict[str, int] = {
+        name: (source_tokens_start or {}).get(name, 0)
+        for name in _source_names
+    }
+
     print(f"Training started: iters {start_iter} → {num_iters}, device={device}" + (" (resumed)" if resumed else ""))
     for i in range(start_iter, num_iters):
         optim.zero_grad()
 
         t_batch = time.time()
         try:
-            batch, labels = next(data_iterator)
+            batch, labels, source_idx = next(data_iterator)
         except StopIteration:
             current_epoch += 1
             if current_epoch >= num_epochs:
@@ -305,8 +312,17 @@ def pretrain(
                 break
             print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
             data_iterator = iter(train_dataloader)
-            batch, labels = next(data_iterator)
+            batch, labels, source_idx = next(data_iterator)
         batch_load_time = time.time() - t_batch
+
+        # Accumulate per-source token counts (source_idx is a [B] int tensor)
+        _step_source_tokens: dict[str, int] = {}
+        seq_len = labels.shape[1]
+        for j, name in enumerate(_source_names):
+            n = int((source_idx == j).sum().item())
+            tokens = n * seq_len
+            _per_source_tokens[name] = _per_source_tokens.get(name, 0) + tokens
+            _step_source_tokens[name] = tokens
 
         batch, labels = batch.to(device), labels.to(device)
 
@@ -368,6 +384,9 @@ def pretrain(
         for k, v in metadata.items():
             if k.startswith("metrics/model/"):
                 wandb_log["model/" + k[len("metrics/model/"):]] = v
+        for name in _source_names:
+            wandb_log[f"data/{name}/tokens"] = _step_source_tokens.get(name, 0)
+            wandb_log[f"data/{name}/cumulative_tokens"] = _per_source_tokens.get(name, 0)
         if local_rank == 0:
             wandb.log(wandb_log, step=i)
 
@@ -448,7 +467,7 @@ def pretrain(
                 plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
 
             if not skip_viz and num_visualize_generations > 0 and tokenizer is not None:
-                viz_batch, _ = next(iter(val_dataloader))
+                viz_batch, _, _ = next(iter(val_dataloader))
                 viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
                 viz_prompt = tokenizer.decode(viz_prompt_tokens)
                 eval_net.eval()
@@ -522,6 +541,7 @@ def pretrain(
                 "val_perplexity": round(avg_val_ppl, 4),
                 "learning_rate": current_lr,
                 "cumulative_tokens": cumulative_tokens,
+                "source_tokens": dict(_per_source_tokens),
                 "iter_time": round(iter_time, 4),
             })
             trainer_state = {
@@ -721,6 +741,7 @@ def main():
 
     start_iter = 0
     cumulative_tokens_start = 0
+    source_tokens_start: dict = {}
     resume_info = ""
     if args.load:
         if args.checkpoint:
@@ -734,6 +755,7 @@ def main():
             start_iter = latest_iter + 1
             history = state.get("log_history", [])
             cumulative_tokens_start = history[-1].get("cumulative_tokens", 0) if history else 0
+            source_tokens_start = history[-1].get("source_tokens", {}) if history else {}
             resume_info = f" (resumed from step {latest_iter})"
             print(f"Resumed from {ckpt_dir}")
         else:
@@ -780,6 +802,7 @@ def main():
         profile_steps=args.profile,
         start_iter=start_iter,
         cumulative_tokens_start=cumulative_tokens_start,
+        source_tokens_start=source_tokens_start,
         eval_config=eval_config,
         num_visualize_generations=args.num_visualize_generations,
         loss_viz_config=loss_viz_config,

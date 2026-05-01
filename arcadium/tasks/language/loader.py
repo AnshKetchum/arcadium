@@ -77,13 +77,16 @@ def load_dataset(data_config: str, sequence_length: int, debug=False, tokenizer=
 
     sources = conf["sources"]
     datasets_and_weights = []
-    for src in sources:
+    names = []
+    for idx, src in enumerate(sources):
         ds = _build_single_source(src, sequence_length, tokenizer, debug, **kwargs)
         weight = float(src.get("weight", 1.0))
         datasets_and_weights.append((ds, weight))
+        name = src.get("name", f"source_{idx}")
+        names.append(name)
         if debug:
-            print(f"[load_dataset] source {src.get('name', src['type'])!r} weight={weight}")
-    return WeightedMixDataset(datasets_and_weights)
+            print(f"[load_dataset] source {name!r} weight={weight}")
+    return WeightedMixDataset(datasets_and_weights, names=names)
 
 
 def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:

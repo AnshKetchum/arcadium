@@ -10,12 +10,18 @@ class WeightedMixDataset(Dataset):
     proportional to its weight, then one item is drawn from that dataset.
     Weights need not sum to 1; they are normalized internally.
 
+    Returns (x, y, source_idx) where source_idx is the integer index of the
+    dataset that produced this sample — used by the training loop to track
+    per-source token counts.
+
     Args:
         datasets_and_weights : list of (dataset, weight) tuples.
                                Weight values may be any positive float.
+        names                : optional list of human-readable source names,
+                               one per dataset. Defaults to "0", "1", ...
     """
 
-    def __init__(self, datasets_and_weights: list):
+    def __init__(self, datasets_and_weights: list, names: list[str] | None = None):
         assert datasets_and_weights, "At least one (dataset, weight) pair required"
         self._datasets, weights = zip(*datasets_and_weights)
         weights = list(weights)
@@ -31,11 +37,10 @@ class WeightedMixDataset(Dataset):
         # Clamp last bucket to exactly 1.0 to absorb float rounding
         self._cum_probs[-1] = 1.0
 
-        if len(self._datasets) == 1:
-            names = [getattr(d, '__class__', type(d)).__name__ for d in self._datasets]
-        else:
-            names = [getattr(d, '__class__', type(d)).__name__ for d in self._datasets]
-        self._names = names
+        self._names: list[str] = (
+            list(names) if names is not None
+            else [str(i) for i in range(len(self._datasets))]
+        )
 
     def __len__(self):
         return 2**31
@@ -44,5 +49,7 @@ class WeightedMixDataset(Dataset):
         r = np.random.random()
         for i, cp in enumerate(self._cum_probs):
             if r < cp:
-                return self._datasets[i][idx]
-        return self._datasets[-1][idx]
+                x, y = self._datasets[i][idx]
+                return x, y, i
+        x, y = self._datasets[-1][idx]
+        return x, y, len(self._datasets) - 1
