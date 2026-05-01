@@ -6,29 +6,27 @@ import torch
 from torch.utils.data import Dataset, get_worker_info
 
 
-class HFTextDataset(Dataset):
+class TextDataset(Dataset):
     """
-    Token-packing dataset over locally-downloaded HuggingFace parquet / JSONL files.
+    Token-packing dataset over local parquet / JSONL files.
 
     Documents are tokenized on the fly, concatenated with EOS, and packed into
-    non-overlapping windows of `sequence_length` tokens.  The token buffer refills
+    non-overlapping windows of `sequence_length` tokens. The token buffer refills
     lazily from a streaming HuggingFace IterableDataset, so memory usage is O(buffer)
     regardless of corpus size.
 
-    Lazy init: the HuggingFace dataset object and its iterator are created on the first
-    __getitem__ call, *after* DataLoader forks worker processes.  Each worker therefore
-    gets an independent streaming iterator, avoiding cross-worker state sharing.
-    Per-worker shuffling is applied via the worker id so that workers sample different
-    document orderings.
+    Lazy init: the dataset iterator is created on the first __getitem__ call, after
+    DataLoader forks worker processes. Each worker gets an independent iterator with
+    a per-worker shuffle seed so workers sample different document orderings.
 
     Args:
-        path        : directory containing parquet / jsonl files, or a single file path.
-        text_key    : field name that holds the document text.
-        tokenizer   : HuggingFace PreTrainedTokenizer (must have encode() and eos_token_id).
+        path            : directory containing parquet / jsonl files, or a single file.
+        text_key        : field name holding the document text.
+        tokenizer       : HuggingFace PreTrainedTokenizer.
         sequence_length : number of tokens per training sample.
-        format      : "parquet" | "jsonl" | "json"  (default: "parquet").
-        val         : if True, shuffle with a fixed seed so val order is deterministic.
-        debug       : print progress messages.
+        format          : "parquet" | "jsonl" | "json"  (default: "parquet").
+        val             : if True, use a fixed seed so val order is deterministic.
+        debug           : print progress messages.
     """
 
     def __init__(
@@ -58,20 +56,17 @@ class HFTextDataset(Dataset):
             self._files = [path]
 
         if not self._files:
-            raise ValueError(f"[HFTextDataset] No {format} files found in {path!r}")
+            raise ValueError(f"[TextDataset] No {format} files found in {path!r}")
 
         # HuggingFace load_dataset uses "json" for both .json and .jsonl
         self._hf_format = "json" if format in ("jsonl", "json") else format
 
-        # Deferred: created after worker fork
+        # Deferred until after DataLoader worker fork
         self._doc_iter = None
         self._token_buffer: deque = deque()
 
         if debug:
-            print(
-                f"[HFTextDataset] {len(self._files)} {format} file(s) at {path!r}, "
-                f"text_key={text_key!r}, val={val}"
-            )
+            print(f"[TextDataset] {len(self._files)} {format} file(s) at {path!r}, text_key={text_key!r}")
 
     # ------------------------------------------------------------------
     # Streaming iterator (lazy, per-worker)
@@ -81,8 +76,6 @@ class HFTextDataset(Dataset):
         from datasets import load_dataset as hf_load_dataset
 
         worker = get_worker_info()
-        # Use worker id (or 0 for single-process) as shuffle seed so every worker
-        # sees a different document ordering.
         seed = (worker.id if worker is not None else 0) + (42 if self.val else 1337)
 
         ds = hf_load_dataset(
@@ -108,12 +101,11 @@ class HFTextDataset(Dataset):
             try:
                 doc = next(self._get_iter())
             except StopIteration:
-                # Restart the stream (documents are exhausted)
                 self._doc_iter = self._build_iter()
                 try:
                     doc = next(self._doc_iter)
                 except StopIteration:
-                    break  # dataset is empty, give up
+                    break
             text = (doc.get(self.text_key) or "").strip()
             if not text:
                 continue
@@ -132,7 +124,6 @@ class HFTextDataset(Dataset):
         needed = self.sequence_length + 1
         self._fill_buffer(needed)
 
-        # Pop exactly one window; pad with EOS if the corpus ran dry.
         available = min(needed, len(self._token_buffer))
         chunk = [self._token_buffer.popleft() for _ in range(available)]
         while len(chunk) < needed:

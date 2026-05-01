@@ -5,10 +5,7 @@ from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 from arcadium.models.language import LanguageModel, LanguageModelConfig
 
 # Datasets
-from arcadium.data.sequence_length import SequenceLengthScheduler
-from arcadium.data.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
-from arcadium.data.fineweb import FineWebBinaryDataset
-from arcadium.data.hf_dataset import HFTextDataset
+from arcadium.data.text_dataset import TextDataset
 from arcadium.data.weighted_mix import WeightedMixDataset
 
 from arcadium.utils import load_config
@@ -21,51 +18,28 @@ def load_tokenizer(model_name_or_path: str) -> PreTrainedTokenizerBase:
     return tok
 
 
+# Per-type defaults for format and text_key.
+_SOURCE_DEFAULTS = {
+    "fineweb": {"format": "parquet", "text_key": "text"},
+    "local":   {"format": "jsonl",   "text_key": "text"},
+    "hf":      {"format": "parquet", "text_key": "text"},
+    "text":    {"format": "parquet", "text_key": "text"},
+}
+
+
 def _build_single_source(src: dict, sequence_length: int, tokenizer, debug: bool, **kwargs):
-    """
-    Instantiate a single dataset from a source dict.
-    src keys: type, path (or folders list), text_key, format, name, weight
-    """
-    src_type = src.get("type", "fineweb")
-    path = src.get("path")
-
-    if src_type == "local":
-        folders = [path] if path else src.get("folders", [])
-        datasets = [
-            DocumentLanguageModelDatasetFromShardsRandomSampling(
-                f, sequence_length, debug=debug, **kwargs
-            )
-            for f in folders
-        ]
-        return WeightedMixDataset([(d, 1.0) for d in datasets]) if len(datasets) > 1 else datasets[0]
-
-    if src_type == "fineweb":
-        folders = [path] if path else src.get("folders", [])
-        datasets = [
-            FineWebBinaryDataset(f, sequence_length, debug=debug, **kwargs)
-            for f in folders
-        ]
-        return WeightedMixDataset([(d, 1.0) for d in datasets]) if len(datasets) > 1 else datasets[0]
-
-    if src_type == "hf":
-        if tokenizer is None:
-            raise ValueError(
-                "A tokenizer is required for datasets of type 'hf'. "
-                "Pass tokenizer= to load_dataset()."
-            )
-        return HFTextDataset(
-            path=path,
-            text_key=src.get("text_key", "text"),
-            tokenizer=tokenizer,
-            sequence_length=sequence_length,
-            format=src.get("format", "parquet"),
-            val=kwargs.get("val", False),
-            debug=debug,
-        )
-
-    raise ValueError(
-        f"Unknown dataset source type {src_type!r}. "
-        "Supported: 'fineweb', 'local', 'hf'."
+    if tokenizer is None:
+        raise ValueError("tokenizer is required — all datasets use on-the-fly tokenization.")
+    src_type = src.get("type", "text")
+    defaults = _SOURCE_DEFAULTS.get(src_type, {"format": "parquet", "text_key": "text"})
+    return TextDataset(
+        path=src["path"],
+        text_key=src.get("text_key", defaults["text_key"]),
+        tokenizer=tokenizer,
+        sequence_length=sequence_length,
+        format=src.get("format", defaults["format"]),
+        val=kwargs.get("val", False),
+        debug=debug,
     )
 
 
@@ -93,7 +67,7 @@ def load_dataset(data_config: str, sequence_length: int, debug=False, tokenizer=
     A single-source config is just a mix with one entry — weights are normalized,
     so weight: 1.0 on a lone source is a no-op.
 
-    tokenizer is required for any source of type "hf".
+    tokenizer is required (all sources tokenize on the fly).
     """
     conf = load_config(data_config, "parameters")
     assert conf.get("type") == "mix", (

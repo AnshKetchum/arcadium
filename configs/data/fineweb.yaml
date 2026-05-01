@@ -4,4 +4,6 @@ parameters:
     - name: "fineweb"
       type: "fineweb"
       path: "data/fineweb10B"
+      format: "parquet"
+      text_key: "text"
       weight: 1.0

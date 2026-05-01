@@ -4,4 +4,6 @@ parameters:
     - name: "starter-medium"
       type: "local"
       path: "data/starter-medium/processed"
+      format: "jsonl"
+      text_key: "text"
       weight: 1.0
