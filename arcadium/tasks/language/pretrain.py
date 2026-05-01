@@ -777,6 +777,12 @@ def main():
         else:
             print(f"No checkpoint found in {run_dir}, starting from scratch.")
 
+    profile_start = args.profile_start
+    profile_end = args.profile_end
+    if args.profile_relative and profile_start >= 0:
+        profile_start += start_iter
+        profile_end += start_iter
+
     if local_rank == 0:
         assert os.getenv("WANDB_API_KEY", None), "Wandb API key is none"
         wandb.init(
@@ -791,8 +797,8 @@ def main():
                 "epochs": conf.get("epochs", 1),
                 "warmup_steps": warmup_steps,
                 "min_lr_ratio": min_lr_ratio,
-                "profile_start": args.profile_start,
-                "profile_end": args.profile_end,
+                "profile_start": profile_start,
+                "profile_end": profile_end,
                 "resumed": args.load is not None,
                 "start_iter": start_iter,
                 "num_dp_ranks": args.num_dp_ranks,
@@ -816,8 +822,8 @@ def main():
         experiment_name=conf["experiment_name"],
         model_name=name,
         run_dir=run_dir,
-        profile_start=args.profile_start,
-        profile_end=args.profile_end,
+        profile_start=profile_start,
+        profile_end=profile_end,
         start_iter=start_iter,
         cumulative_tokens_start=cumulative_tokens_start,
         source_tokens_start=source_tokens_start,
