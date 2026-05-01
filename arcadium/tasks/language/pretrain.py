@@ -243,7 +243,8 @@ def pretrain(
     experiment_name=None,
     model_name=None,
     run_dir=None,
-    profile_steps=0,
+    profile_start=-1,
+    profile_end=-1,
     start_iter=0,
     cumulative_tokens_start=0,
     source_tokens_start=None,
@@ -275,17 +276,17 @@ def pretrain(
     data_iterator = iter(train_dataloader)
     current_epoch = 0
 
+    _profiler_active = False
     profiler = None
-    if profile_steps > 0:
+    if profile_start >= 0 and profile_end > profile_start:
         profile_dir = os.path.join(run_dir, "profile")
         os.makedirs(profile_dir, exist_ok=True)
         profiler = torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=profile_steps, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True, profile_memory=True, with_stack=True,
         )
-        profiler.start()
+        print(f"Profiler armed: will capture iters [{profile_start}, {profile_end}] → {profile_dir}")
 
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
@@ -390,8 +391,17 @@ def pretrain(
         if local_rank == 0:
             wandb.log(wandb_log, step=i)
 
-        if profiler is not None:
+        if profiler is not None and i == profile_start:
+            profiler.start()
+            _profiler_active = True
+            print(f"[iter {i}] Profiler started")
+        if _profiler_active:
             profiler.step()
+        if _profiler_active and i == profile_end:
+            profiler.stop()
+            _profiler_active = False
+            profiler = None
+            print(f"[iter {i}] Profiler stopped → {profile_dir}")
 
         do_checkpoint = (i % checkpoint_frequency == 0 or i == num_iters - 1)
 
@@ -566,7 +576,7 @@ def pretrain(
 
     for h in hooks:
         h.remove()
-    if profiler is not None:
+    if _profiler_active and profiler is not None:
         profiler.stop()
 
 def setup():
@@ -595,8 +605,14 @@ def main():
                              "batch_size (int|'auto').")
     parser.add_argument("--tokenizer_path", type=str, default=None,
                         help="(Deprecated) Legacy path — tokenizer is now specified in model config")
-    parser.add_argument("--profile", type=int, default=0,
-                        help="Number of steps to profile with torch.profiler (0 = disabled)")
+    parser.add_argument("--profile-start", type=int, default=-1,
+                        help="Iteration to start torch.profiler CUDA profiling (-1 = disabled)")
+    parser.add_argument("--profile-end", type=int, default=-1,
+                        help="Iteration to stop torch.profiler CUDA profiling (inclusive, must be > --profile-start)")
+    parser.add_argument("--profile-relative", action="store_true",
+                        help="Treat --profile-start/--profile-end as offsets from the resume iteration "
+                             "(e.g. --profile-start 10 --profile-end 50 --profile-relative profiles "
+                             "iters resume+10 through resume+50)")
     parser.add_argument("--load", type=str, default=None,
                         help="Path to an existing run directory to resume training from. "
                              "The latest checkpoint-{N} inside it will be loaded automatically.")
@@ -775,7 +791,8 @@ def main():
                 "epochs": conf.get("epochs", 1),
                 "warmup_steps": warmup_steps,
                 "min_lr_ratio": min_lr_ratio,
-                "profile_steps": args.profile,
+                "profile_start": args.profile_start,
+                "profile_end": args.profile_end,
                 "resumed": args.load is not None,
                 "start_iter": start_iter,
                 "num_dp_ranks": args.num_dp_ranks,
@@ -799,7 +816,8 @@ def main():
         experiment_name=conf["experiment_name"],
         model_name=name,
         run_dir=run_dir,
-        profile_steps=args.profile,
+        profile_start=args.profile_start,
+        profile_end=args.profile_end,
         start_iter=start_iter,
         cumulative_tokens_start=cumulative_tokens_start,
         source_tokens_start=source_tokens_start,
