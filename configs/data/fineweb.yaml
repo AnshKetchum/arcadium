@@ -1,4 +1,7 @@
 parameters:
-  type: "fineweb"
-  folders: 
-    - data/fineweb10B
+  type: "mix"
+  sources:
+    - name: "fineweb"
+      type: "fineweb"
+      path: "data/fineweb10B"
+      weight: 1.0

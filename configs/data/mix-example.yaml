@@ -1,0 +1,26 @@
+parameters:
+  type: "mix"
+  sources:
+    # Pre-tokenized FineWeb binary shards (existing format)
+    - name: "fineweb"
+      type: "fineweb"
+      path: "data/fineweb10B"
+      weight: 0.7
+
+    # HuggingFace parquet dataset downloaded locally
+    # Download with: python scripts/download_hf_datasets.py HuggingFaceFW/fineweb-edu data/fineweb-edu
+    - name: "fineweb-edu"
+      type: "hf"
+      path: "data/fineweb-edu"
+      format: "parquet"
+      text_key: "text"
+      weight: 0.2
+
+    # HuggingFace JSONL dataset downloaded locally
+    # Download with: python scripts/download_hf_datasets.py bigcode/the-stack data/the-stack --patterns "*.jsonl"
+    - name: "the-stack"
+      type: "hf"
+      path: "data/the-stack"
+      format: "jsonl"
+      text_key: "content"
+      weight: 0.1

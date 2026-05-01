@@ -10,8 +10,11 @@ parameters:
   sequence_length: 1024       # increased from 32
   lr: 3e-4
   optimizer:
-    name: "adam"
-    lr: 3e-4                 # decreased from 0.001, actual lr
+    name: "muon+adam"
+    lr: 3e-4           # AdamW lr (biases, norms, embeddings)
+    muon_lr: 0.02      # Muon lr (all 2-D weight matrices)
+    weight_decay: 0.1  # AdamW decoupled weight decay
+    ns_steps: 5        # Newton-Schulz iterations for orthogonalization
   training_sequence_length:
     start: 1024               # fixed length, no curriculum
     end: 1024                 # fixed length, no curriculum

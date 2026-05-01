@@ -14,7 +14,7 @@ import glob
 import re
 from lm_eval import simple_evaluate
 from lm_eval.models.huggingface import HFLM
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from arcadium.tasks.language.loader import load_language_model, load_dataset
 from arcadium.data.sequence_length import SequenceLengthSampler
 from arcadium.optimizers.loader import load_optimizer
@@ -30,6 +30,8 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
+from torch.distributed.optim import ZeroRedundancyOptimizer
 
 load_dotenv()
 
@@ -65,20 +67,33 @@ def find_latest_checkpoint(run_dir: str):
     return latest, int(re.search(r"checkpoint-(\d+)$", latest).group(1))
 
 
-def load_checkpoint(checkpoint_dir, net, optim, scheduler):
+def load_checkpoint(checkpoint_dir, net, optim, scheduler, parallel_mode="ddp"):
     """
     Restore model weights from safetensors and optimizer/scheduler from .pt files.
     Returns the trainer_state dict (used to recover cumulative_tokens etc.), or {}.
     """
-    raw_net = net.module if isinstance(net, DDP) else net
     weights_path = os.path.join(checkpoint_dir, "model.safetensors")
-    raw_net.load_state_dict(load_file(weights_path))
+    if isinstance(net, FSDP):
+        state_dict = load_file(weights_path)
+        with FSDP.state_dict_type(net, StateDictType.FULL_STATE_DICT,
+                                  FullStateDictConfig(rank0_only=False)):
+            net.load_state_dict(state_dict)
+    else:
+        raw_net = net.module if isinstance(net, DDP) else net
+        raw_net.load_state_dict(load_file(weights_path))
 
-    for fname, obj in [("optimizer.pt", optim), ("scheduler.pt", scheduler)]:
-        path = os.path.join(checkpoint_dir, fname)
-        print(f"Attempting to load {path}")
-        if os.path.exists(path):
-            obj.load_state_dict(torch.load(path, map_location="cpu"))
+    opt_path = os.path.join(checkpoint_dir, "optimizer.pt")
+    print(f"Attempting to load {opt_path}")
+    if os.path.exists(opt_path):
+        opt_state = torch.load(opt_path, map_location="cpu")
+        if isinstance(net, FSDP):
+            opt_state = FSDP.optim_state_dict_to_load(net, optim, opt_state)
+        optim.load_state_dict(opt_state)
+
+    sched_path = os.path.join(checkpoint_dir, "scheduler.pt")
+    print(f"Attempting to load {sched_path}")
+    if os.path.exists(sched_path):
+        scheduler.load_state_dict(torch.load(sched_path, map_location="cpu"))
 
     state_path = os.path.join(checkpoint_dir, "trainer_state.json")
     if os.path.exists(state_path):
@@ -237,6 +252,7 @@ def pretrain(
     spectral_viz=False,
     local_rank=0,
     resumed=False,
+    parallel_mode="ddp",
 ):
     """
     Main pretraining loop.
@@ -306,7 +322,10 @@ def pretrain(
         backward_time = time.time() - t1
 
         t2 = time.time()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        if isinstance(net, FSDP):
+            net.clip_grad_norm_(max_norm=1.0)
+        else:
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
         optim.step()
         scheduler.step()
         optimizer_time = time.time() - t2
@@ -355,24 +374,42 @@ def pretrain(
         if profiler is not None:
             profiler.step()
 
-        if local_rank == 0 and (i % checkpoint_frequency == 0 or i == num_iters - 1):
+        do_checkpoint = (i % checkpoint_frequency == 0 or i == num_iters - 1)
+
+        # All-rank operations that must precede rank-0 I/O.
+        _fsdp_model_state = _fsdp_optim_state = None
+        if do_checkpoint and isinstance(net, FSDP):
+            with FSDP.state_dict_type(net, StateDictType.FULL_STATE_DICT,
+                                      FullStateDictConfig(offload_to_cpu=True, rank0_only=True)):
+                _fsdp_model_state = net.state_dict()
+            _fsdp_optim_state = FSDP.optim_state_dict(net, optim)
+        if do_checkpoint and isinstance(optim, ZeroRedundancyOptimizer):
+            optim.consolidate_state_dict(to=0)
+
+        if local_rank == 0 and do_checkpoint:
             checkpoint_dir = os.path.join(run_dir, f"checkpoint-{i}")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-            raw_net = net.module if isinstance(net, DDP) else net
-            raw_net.save_pretrained(checkpoint_dir, safe_serialization=True)
+            if isinstance(net, FSDP):
+                save_file(_fsdp_model_state, os.path.join(checkpoint_dir, "model.safetensors"))
+                net.module.config.save_pretrained(checkpoint_dir)
+                torch.save(_fsdp_optim_state, os.path.join(checkpoint_dir, "optimizer.pt"))
+            else:
+                raw_net = net.module if isinstance(net, DDP) else net
+                raw_net.save_pretrained(checkpoint_dir, safe_serialization=True)
+                torch.save(optim.state_dict(), os.path.join(checkpoint_dir, "optimizer.pt"))
 
             if tokenizer is not None:
                 tokenizer.save_pretrained(checkpoint_dir)
 
-            torch.save(optim.state_dict(), os.path.join(checkpoint_dir, "optimizer.pt"))
             torch.save(scheduler.state_dict(), os.path.join(checkpoint_dir, "scheduler.pt"))
 
             with open(os.path.join(checkpoint_dir, "activations.json"), "w") as f:
                 json.dump(dict(activation_stats), f)
 
+            eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
             avg_val_loss, avg_val_ppl = run_validation(
-                raw_net, tokenizer, val_dataloader, device,
+                eval_net, tokenizer, val_dataloader, device,
                 run_dir=run_dir, max_steps=num_val_iters, step=i,
             )
             net.train()
@@ -381,8 +418,8 @@ def pretrain(
             if eval_config is not None and tokenizer is not None:
                 num_runs = int(eval_config.get("num_runs", 1))
                 print(f"[iter {i}] Running lm-eval ({num_runs} run(s)): {eval_config['tasks']}")
-                raw_net.eval()
-                eval_results = run_lm_eval(raw_net, tokenizer, eval_config, device)
+                eval_net.eval()
+                eval_results = run_lm_eval(eval_net, tokenizer, eval_config, device)
                 net.train()
                 eval_out = {
                     "iter": i,
@@ -408,15 +445,15 @@ def pretrain(
 
             skip_viz = resumed and i == start_iter
             if not skip_viz:
-                plot_visualizations(raw_net, os.path.join(run_dir, "visualizations"), i)
+                plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
 
             if not skip_viz and num_visualize_generations > 0 and tokenizer is not None:
                 viz_batch, _ = next(iter(val_dataloader))
                 viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
                 viz_prompt = tokenizer.decode(viz_prompt_tokens)
-                raw_net.eval()
+                eval_net.eval()
                 _, hidden_states_per_step = generate(
-                    viz_prompt, tokenizer, raw_net, device,
+                    viz_prompt, tokenizer, eval_net, device,
                     max_output_length=num_visualize_generations,
                     generation_folder="", checkpoint_path="", tokenizer_path="",
                     collect_hidden_states=True,
@@ -458,8 +495,8 @@ def pretrain(
                     save_interactive_visualization=loss_viz_config.get("interactive", False),
                 )
                 activation_stats.clear()
-                raw_net.eval()
-                loss_visualizer.visualize(raw_net, val_dataloader, device)
+                eval_net.eval()
+                loss_visualizer.visualize(eval_net, val_dataloader, device)
                 del loss_visualizer
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -470,9 +507,9 @@ def pretrain(
                 from hyperviz.spectral_visualizer import SpectralVisualizer
                 spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
                 sv = SpectralVisualizer(save_directory=spectral_viz_dir)
-                raw_net.eval()
+                eval_net.eval()
                 with torch.no_grad():
-                    sv.visualize(raw_net)
+                    sv.visualize(eval_net)
                 net.train()
                 print(f"[iter {i}] spectral viz → {spectral_viz_dir}/spectral_values/")
 
@@ -576,9 +613,15 @@ def main():
 
     parallel_group = parser.add_argument_group("parallelism")
     parallel_group.add_argument("--num-dp-ranks", type=int, default=0,
-                                help="Number of ranks for DistributedDataParallel. "
+                                help="Number of ranks for data parallelism. "
                                      "0 = disabled (single-process). When >0, launch with "
                                      "`torchrun --nproc-per-node=<N>`.")
+    parallel_group.add_argument("--parallel-mode", type=str, default="ddp",
+                                choices=["ddp", "fsdp", "zero1"],
+                                help="Parallelism strategy when --num-dp-ranks > 0. "
+                                     "ddp: DistributedDataParallel (default). "
+                                     "fsdp: FullyShardedDataParallel (shards params+grads+optimizer). "
+                                     "zero1: DDP + ZeroRedundancyOptimizer (shards optimizer state only).")
 
     args = parser.parse_args()
 
@@ -617,9 +660,10 @@ def main():
         if args.eval_config:
             shutil.copy(args.eval_config, run_dir)
 
-    use_ddp = args.num_dp_ranks > 0
+    use_distributed = args.num_dp_ranks > 0
+    parallel_mode = args.parallel_mode if use_distributed else "none"
     local_rank = 0
-    if use_ddp:
+    if use_distributed:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         setup()
         device = torch.device(f"cuda:{local_rank}")
@@ -635,13 +679,16 @@ def main():
     if local_rank == 0:
         summary(net, input_data=x)
 
-    if use_ddp:
-        net = DDP(net, device_ids=[local_rank])
+    if use_distributed:
+        if parallel_mode == "fsdp":
+            net = FSDP(net, device_id=local_rank)
+        else:
+            net = DDP(net, device_ids=[local_rank])
 
     train_seq = conf["training_sequence_length"]
     train_dataset = load_dataset(conf["training_data_config"], train_seq["start"],
-                                 debug=args.verbose, val=False)
-    if use_ddp:
+                                 debug=args.verbose, val=False, tokenizer=tokenizer)
+    if use_distributed:
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
     else:
         train_sampler = SequenceLengthSampler(
@@ -653,12 +700,18 @@ def main():
                                   num_workers=conf["num_workers"], sampler=train_sampler)
 
     val_dataset = load_dataset(conf["validation_data_config"], conf["validation_sequence_length"],
-                               debug=args.verbose, val=True)
+                               debug=args.verbose, val=True, tokenizer=tokenizer)
     val_batch_size = args.val_batch_size if args.val_batch_size is not None else conf["batch_size"]
     val_dataloader = DataLoader(val_dataset, batch_size=val_batch_size,
                                 shuffle=True, num_workers=conf["num_workers"])
 
     optim = load_optimizer(net, **conf["optimizer"])
+    if parallel_mode == "zero1":
+        _param_groups = optim.param_groups
+        _optim_class = type(optim)
+        _optim_defaults = dict(optim.defaults)
+        del optim
+        optim = ZeroRedundancyOptimizer(_param_groups, optimizer_class=_optim_class, **_optim_defaults)
     warmup_steps = conf.get("warmup_steps", min(2000, conf["training_steps"] // 20))
     min_lr_ratio = conf.get("min_lr_ratio", 0.01)
     scheduler = LambdaLR(
@@ -677,7 +730,7 @@ def main():
         else:
             ckpt_dir, latest_iter = find_latest_checkpoint(run_dir)
         if ckpt_dir:
-            state = load_checkpoint(ckpt_dir, net, optim, scheduler)
+            state = load_checkpoint(ckpt_dir, net, optim, scheduler, parallel_mode=parallel_mode)
             start_iter = latest_iter + 1
             history = state.get("log_history", [])
             cumulative_tokens_start = history[-1].get("cumulative_tokens", 0) if history else 0
@@ -704,6 +757,7 @@ def main():
                 "resumed": args.load is not None,
                 "start_iter": start_iter,
                 "num_dp_ranks": args.num_dp_ranks,
+                "parallel_mode": parallel_mode,
             },
         )
         wandb.watch(net, log="all", log_freq=100)
@@ -732,9 +786,10 @@ def main():
         spectral_viz=args.spectral_viz,
         local_rank=local_rank,
         resumed=args.load is not None and start_iter > 0,
+        parallel_mode=parallel_mode,
     )
 
-    if use_ddp:
+    if use_distributed:
         cleanup()
 
 

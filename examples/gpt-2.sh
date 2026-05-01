@@ -46,6 +46,11 @@ TORCHRUN_ARGS=(
 
 PARALLELISM_ARGS=(
   --num-dp-ranks $NUM_DP_RANKS
+  # Parallelism strategy (pick one):
+  #   ddp    – DistributedDataParallel (default, lowest overhead)
+  #   fsdp   – FullyShardedDataParallel (shards params+grads+optimizer, best for large models)
+  #   zero1  – DDP + ZeroRedundancyOptimizer (shards optimizer state only, drop-in DDP upgrade)
+  --parallel-mode ddp
 )
 
 RUN_DIR_ARGS=(

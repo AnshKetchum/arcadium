@@ -8,7 +8,8 @@ from arcadium.models.language import LanguageModel, LanguageModelConfig
 from arcadium.data.sequence_length import SequenceLengthScheduler
 from arcadium.data.single_folder import DocumentLanguageModelDatasetFromShardsRandomSampling
 from arcadium.data.fineweb import FineWebBinaryDataset
-from arcadium.data.multi_dataset import AggregatedRoundRobinDataset
+from arcadium.data.hf_dataset import HFTextDataset
+from arcadium.data.weighted_mix import WeightedMixDataset
 
 from arcadium.utils import load_config
 
@@ -20,25 +21,95 @@ def load_tokenizer(model_name_or_path: str) -> PreTrainedTokenizerBase:
     return tok
 
 
-def load_dataset(data_config: str, sequence_length: int, debug=False, **kwargs):
+def _build_single_source(src: dict, sequence_length: int, tokenizer, debug: bool, **kwargs):
+    """
+    Instantiate a single dataset from a source dict.
+    src keys: type, path (or folders list), text_key, format, name, weight
+    """
+    src_type = src.get("type", "fineweb")
+    path = src.get("path")
+
+    if src_type == "local":
+        folders = [path] if path else src.get("folders", [])
+        datasets = [
+            DocumentLanguageModelDatasetFromShardsRandomSampling(
+                f, sequence_length, debug=debug, **kwargs
+            )
+            for f in folders
+        ]
+        return WeightedMixDataset([(d, 1.0) for d in datasets]) if len(datasets) > 1 else datasets[0]
+
+    if src_type == "fineweb":
+        folders = [path] if path else src.get("folders", [])
+        datasets = [
+            FineWebBinaryDataset(f, sequence_length, debug=debug, **kwargs)
+            for f in folders
+        ]
+        return WeightedMixDataset([(d, 1.0) for d in datasets]) if len(datasets) > 1 else datasets[0]
+
+    if src_type == "hf":
+        if tokenizer is None:
+            raise ValueError(
+                "A tokenizer is required for datasets of type 'hf'. "
+                "Pass tokenizer= to load_dataset()."
+            )
+        return HFTextDataset(
+            path=path,
+            text_key=src.get("text_key", "text"),
+            tokenizer=tokenizer,
+            sequence_length=sequence_length,
+            format=src.get("format", "parquet"),
+            val=kwargs.get("val", False),
+            debug=debug,
+        )
+
+    raise ValueError(
+        f"Unknown dataset source type {src_type!r}. "
+        "Supported: 'fineweb', 'local', 'hf'."
+    )
+
+
+def load_dataset(data_config: str, sequence_length: int, debug=False, tokenizer=None, **kwargs):
+    """
+    Build a dataset from a YAML config.
+
+    All configs use the unified mix format:
+
+        parameters:
+          type: "mix"
+          sources:
+            - name: "fineweb"
+              type: "fineweb"      # "fineweb" | "local" | "hf"
+              path: "data/fineweb10B"
+              weight: 1.0
+
+            - name: "code"
+              type: "hf"           # HuggingFace parquet / JSONL, downloaded locally
+              path: "data/the-stack"
+              format: "parquet"    # "parquet" | "jsonl"
+              text_key: "content"
+              weight: 0.3
+
+    A single-source config is just a mix with one entry — weights are normalized,
+    so weight: 1.0 on a lone source is a no-op.
+
+    tokenizer is required for any source of type "hf".
+    """
     conf = load_config(data_config, "parameters")
-    LOCAL = "local"
-    FINEWEB = "fineweb"
+    assert conf.get("type") == "mix", (
+        f"Data config {data_config!r} must have type: 'mix'. "
+        "All configs now use the unified sources format."
+    )
 
-    datasets = []
-
-    if conf["type"] == LOCAL:
-        for fldr in conf.get("folders", []):
-            datasets.append(DocumentLanguageModelDatasetFromShardsRandomSampling(
-                fldr, sequence_length, debug=debug, **kwargs
-            ))
-    elif conf["type"] == FINEWEB:
-        for fldr in conf.get("folders", []):
-            datasets.append(FineWebBinaryDataset(
-                fldr, sequence_length, debug=debug, **kwargs
-            ))
-
-    return AggregatedRoundRobinDataset(datasets)
+    sources = conf["sources"]
+    datasets_and_weights = []
+    for src in sources:
+        ds = _build_single_source(src, sequence_length, tokenizer, debug, **kwargs)
+        weight = float(src.get("weight", 1.0))
+        datasets_and_weights.append((ds, weight))
+        if debug:
+            print(f"[load_dataset] source {src.get('name', src['type'])!r} weight={weight}")
+    return WeightedMixDataset(datasets_and_weights)
 
 
 def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:
@@ -57,7 +128,7 @@ def _build_model(arch: dict, vocab_size: int) -> PreTrainedModel:
     if architecture == "universal_transformer":
         from arcadium.models.universal_transformer import UniversalTransformer, UniversalTransformerConfig
         return UniversalTransformer(UniversalTransformerConfig(**cfg))
-    
+
     if architecture == "qwen3":
         from arcadium.models.qwen3 import Qwen3, Qwen3Config
         return Qwen3(Qwen3Config(**cfg))

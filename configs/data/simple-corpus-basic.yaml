@@ -1,4 +1,7 @@
 parameters:
-  type: "local"
-  folders: 
-    - data/starter-medium/processed
+  type: "mix"
+  sources:
+    - name: "starter-medium"
+      type: "local"
+      path: "data/starter-medium/processed"
+      weight: 1.0

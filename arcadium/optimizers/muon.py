@@ -83,6 +83,88 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
     return buf1c / (buf2c.sqrt() + eps)
 
 
+class DistributedMuonWithAuxAdamW(torch.optim.Optimizer):
+    """
+    Muon for 2-D+ params with an explicit all-reduce before Newton-Schulz orthogonalization,
+    and AdamW (decoupled weight decay) for 1-D params (biases, layer-norm scales, embeddings).
+
+    The explicit all-reduce means this class is correct whether run under DDP (where DDP has
+    already averaged grads) or bare torchrun without DDP. When dist is not initialized or
+    world_size == 1 the all-reduce is skipped entirely.
+
+    Expected param_group keys:
+      use_muon=True  : lr, momentum (0.95), weight_decay (0), ns_steps (5)
+      use_muon=False : lr, betas ((0.9, 0.95)), eps (1e-8), weight_decay (0.1)
+    """
+    def __init__(self, param_groups):
+        for group in param_groups:
+            assert "use_muon" in group, "Every param group must have 'use_muon'"
+            if group["use_muon"]:
+                group.setdefault("lr", 0.02)
+                group.setdefault("momentum", 0.95)
+                group.setdefault("weight_decay", 0)
+                group.setdefault("ns_steps", 5)
+            else:
+                group.setdefault("lr", 3e-4)
+                group.setdefault("betas", (0.9, 0.95))
+                group.setdefault("eps", 1e-8)
+                group.setdefault("weight_decay", 0.1)
+        super().__init__(param_groups, {})
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if group["use_muon"]:
+                params = [p for p in group["params"] if p.requires_grad]
+
+                # Ensure every param has a grad tensor so all-reduce is well-defined.
+                for p in params:
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)
+
+                # Explicit all-reduce: correct for bare torchrun without DDP.
+                # Under DDP, grads are already averaged — this becomes a cheap no-op
+                # because the already-averaged values all-reduce to themselves.
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    handles = [
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG, async_op=True)
+                        for p in params
+                    ]
+                    for h in handles:
+                        h.wait()
+
+                for p in params:
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+                    update = muon_update(p.grad, state["momentum_buffer"],
+                                        beta=group["momentum"], ns_steps=group["ns_steps"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
+            else:
+                for p in group["params"]:
+                    if not p.requires_grad or p.grad is None:
+                        continue
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+                    state["step"] += 1
+                    # Decoupled weight decay (AdamW).
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
+                                        state["step"], group["betas"], group["eps"])
+                    p.add_(update, alpha=-group["lr"])
+
+        return loss
+
+
 class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
