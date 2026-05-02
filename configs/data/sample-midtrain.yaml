@@ -1,0 +1,40 @@
+parameters:
+  type: "mix"
+  sources:
+    - name: "fineweb-mask-dedup"
+      type: "hf"
+      path: "/scratch/ansh/data/fineweb-mask-dedup/chunk1"
+      text_key: "text"
+      weight: 0.12
+
+    - name: "mga-fineweb-edu"
+      type: "hf"
+      path: "/scratch/ansh/data/mga-fineweb-edu/data"
+      text_key: "content_split"
+      weight: 0.1
+
+    - name: "knowledge-pile"
+      type: "hf"
+      path: "/scratch/ansh/data/knowledge-pile/data"
+      text_key: "content"
+      format: "jsonl"
+      weight: 0.1
+
+    - name: "github-code"
+      type: "hf"
+      path: "/scratch/ansh/data/github-code/data"
+      text_key: "content"
+      weight: 0.13
+
+    - name: "step3_5_flash_pretrain"
+      type: "hf"
+      path: "/scratch/ansh/data/step3_5_flash_pretrain/data"
+      text_key: "text"
+      format: "jsonl"
+      weight: 0.02
+
+    - name: "megamath-web-pro"
+      type: "hf"
+      path: "/scratch/ansh/data/megamath-web-pro/data"
+      text_key: "text"
+      weight: 0.05

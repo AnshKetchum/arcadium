@@ -87,30 +87,30 @@ class Attention(nn.Module):
         mscale = 0.1 * math.log(yarn_scale) + 1.0 if yarn_scale > 1.0 else 1.0
         self.attn_scale = 1.0 / (mscale * math.sqrt(d_head))
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
 
         q = self.q_proj(x)
         k, v = self.kv_proj(x).chunk(2, dim=-1)
 
-        # (B, qpg, n_kv, T, d_head)
         q = rearrange(q, "b t (qpg g d) -> b qpg g t d", qpg=self.queries_per_group, g=self.n_kv_heads, d=self.d_head)
-        # (B, 1, n_kv, T, d_head) — broadcasts over qpg in matmul
         k = rearrange(k, "b t (g d) -> b 1 g t d", g=self.n_kv_heads, d=self.d_head)
         v = rearrange(v, "b t (g d) -> b 1 g t d", g=self.n_kv_heads, d=self.d_head)
 
-        # QK-norm then RoPE (Qwen3 order)
-        q = _apply_rope(self.q_norm(q), self.inv_freq)
-        k = _apply_rope(self.k_norm(k), self.inv_freq)
+        # QK-norm and RoPE in fp32 for numerical precision, then cast back
+        orig_dtype = q.dtype
+        q = _apply_rope(self.q_norm(q.float()), self.inv_freq).to(orig_dtype)
+        k = _apply_rope(self.k_norm(k.float()), self.inv_freq).to(orig_dtype)
 
-        if mask is None:
-            mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, 1, T, T)
+        # Expand k/v over qpg then reshape to [B, n_query_heads, T, d_head] for SDPA
+        k = k.expand(B, self.queries_per_group, self.n_kv_heads, T, self.d_head)
+        v = v.expand(B, self.queries_per_group, self.n_kv_heads, T, self.d_head)
+        q = q.reshape(B, self.n_query_heads, T, self.d_head)
+        k = k.reshape(B, self.n_query_heads, T, self.d_head)
+        v = v.reshape(B, self.n_query_heads, T, self.d_head)
 
-        attn = (q @ k.transpose(-2, -1)) * self.attn_scale
-        attn = attn.masked_fill(mask == 0, float("-inf"))
-        attn = F.softmax(attn, dim=-1)
-
-        out = rearrange(attn @ v, "b qpg g t d -> b t (qpg g d)")
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.attn_scale)
+        out = rearrange(out, "b h t d -> b t (h d)")
         return self.out(out)
 
 
@@ -151,8 +151,8 @@ class Block(nn.Module):
         )
         self.feed_forward_network = MLP(d_model, mlp_expansion_factor)
 
-    def forward(self, x: torch.Tensor, mask=None) -> torch.Tensor:
-        attn = self.attention(self.pre_attention_norm(x), mask) + x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn = self.attention(self.pre_attention_norm(x)) + x
         ffn = self.feed_forward_network(self.pre_ffn_norm(attn)) + attn
         return ffn
 
@@ -198,13 +198,12 @@ class Qwen3(PreTrainedModel):
         self,
         input_ids: torch.Tensor,
         labels: torch.Tensor | None = None,
-        mask: torch.Tensor | None = None,
         **kwargs,
     ) -> LMOutput:
         h = self.embedding(input_ids)
         hidden_states = []
         for block in self.blocks:
-            h = block(h, mask)
+            h = block(h)
             hidden_states.append(h.detach().float().cpu())
         logits = F.linear(self.final_norm(h), self.lm_head)
 

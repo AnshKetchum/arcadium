@@ -5,16 +5,16 @@ parameters:
   epochs: 2
   val_steps: 10
   checkpoint_frequency: 1000  # keeping as requested
-  batch_size: 32              # increased from 8
+  batch_size: 2 # increased from 8
   num_workers: 4              # keeping as requested
-  sequence_length: 1024       # increased from 32
+  sequence_length: 4096      # increased from 32
   lr: 3e-4
   optimizer:
     name: "adam"
     lr: 3e-4                 # decreased from 0.001, actual lr
   training_sequence_length:
-    start: 1024               # fixed length, no curriculum
-    end: 1024                 # fixed length, no curriculum
+    start: 4096 # fixed length, no curriculum
+    end: 4096 # fixed length, no curriculum
     steps: 1                  # no curriculum steps
   validation_sequence_length: 1024  # increased from 256
   training_data_config: "configs/data/sample-midtrain.yaml"

@@ -11,10 +11,11 @@ from arcadium.data.weighted_mix import WeightedMixDataset
 from arcadium.utils import load_config
 
 
-def load_tokenizer(model_name_or_path: str) -> PreTrainedTokenizerBase:
+def load_tokenizer(model_name_or_path: str, model_max_length: int = int(1e30)) -> PreTrainedTokenizerBase:
     tok = AutoTokenizer.from_pretrained(model_name_or_path)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    tok.model_max_length = model_max_length
     return tok
 
 

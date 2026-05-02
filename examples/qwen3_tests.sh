@@ -13,12 +13,12 @@ export TOKENIZERS_PARALLELISM="false"
 
 # Define model args
 MODEL_ARGS=(
-  --model_config configs/models/qwen3/fineweb-qwen.yaml
+  --model_config configs/models/qwen3/test-qwen.yaml
 )
 
 # Define data/training args
 DATA_ARGS=(
-  --training_config configs/training/qwen3-fineweb.yaml
+  --training_config configs/training/qwen3-midtrain.yaml
 )
 
 # Visualizations per checkpoint

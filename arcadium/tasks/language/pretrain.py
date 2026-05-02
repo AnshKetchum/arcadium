@@ -1,5 +1,6 @@
 import argparse
 from collections import defaultdict
+import inspect
 import json
 import shutil
 import torch
@@ -108,11 +109,12 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler, parallel_mode="ddp"):
 
 def training_step(net, batch, labels):
     """Forward pass. Returns (logits, loss, metadata)."""
-    output = net(batch)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        output = net(batch)
     logits = output.logits if hasattr(output, "logits") else output
     metadata = output.metadata if hasattr(output, "metadata") else {}
     B, T, V = logits.shape
-    loss = F.cross_entropy(logits.view(B * T, V), labels.view(B * T))
+    loss = F.cross_entropy(logits.float().view(B * T, V), labels.view(B * T))
     return logits, loss, metadata
 
 
@@ -141,11 +143,19 @@ def run_lm_eval(net, tokenizer, eval_conf, device):
 
     num_runs = int(eval_conf.get("num_runs", 1))
     max_len = getattr(net.config, "max_position_embeddings", 1024)
+    tasks = eval_conf["tasks"]
+    num_fewshot = eval_conf.get("num_fewshot", 0)
+    limit = eval_conf.get("limit", None)
+    print(f"  lm-eval tasks={tasks} num_fewshot={num_fewshot} limit={limit} "
+          f"batch_size={eval_conf.get('batch_size', 'auto')} max_length={max_len}")
+
+    import logging
+    logging.getLogger("lm_eval").setLevel(logging.INFO)
 
     all_runs = []
     for run_idx in range(num_runs):
-        if num_runs > 1:
-            print(f"  lm-eval run {run_idx + 1}/{num_runs}")
+        print(f"  lm-eval run {run_idx + 1}/{num_runs} starting...", flush=True)
+        t_eval = time.time()
         lm = HFLM(
             pretrained=net,
             tokenizer=tokenizer,
@@ -154,10 +164,12 @@ def run_lm_eval(net, tokenizer, eval_conf, device):
         )
         raw = simple_evaluate(
             model=lm,
-            tasks=eval_conf["tasks"],
-            num_fewshot=eval_conf.get("num_fewshot", 0),
-            limit=eval_conf.get("limit", None),
+            tasks=tasks,
+            num_fewshot=num_fewshot,
+            limit=limit,
+            verbosity="INFO",
         )
+        print(f"  lm-eval run {run_idx + 1}/{num_runs} done ({time.time() - t_eval:.1f}s)", flush=True)
         all_runs.append(raw.get("results", {}))
 
     aggregated = {}
@@ -331,11 +343,15 @@ def pretrain(
             torch.cuda.reset_peak_memory_stats(device)
 
         t0 = time.time()
+        print(f"[rank {local_rank}] forward start (iter {i})", flush=True)
         _, loss, metadata = training_step(net, batch=batch, labels=labels)
+        print(f"[rank {local_rank}] forward done (iter {i})", flush=True)
         forward_time = time.time() - t0
 
         t1 = time.time()
+        print(f"[rank {local_rank}] backward start (iter {i})", flush=True)
         loss.backward()
+        print(f"[rank {local_rank}] backward done (iter {i})", flush=True)
         backward_time = time.time() - t1
 
         t2 = time.time()
@@ -343,7 +359,9 @@ def pretrain(
             net.clip_grad_norm_(max_norm=1.0)
         else:
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+        print(f"[rank {local_rank}] optimizer step start (iter {i})", flush=True)
         optim.step()
+        print(f"[rank {local_rank}] optimizer step done (iter {i})", flush=True)
         scheduler.step()
         optimizer_time = time.time() - t2
 
@@ -404,6 +422,8 @@ def pretrain(
             print(f"[iter {i}] Profiler stopped → {profile_dir}")
 
         do_checkpoint = (i % checkpoint_frequency == 0 or i == num_iters - 1)
+        skip_viz = resumed and i == start_iter
+        checkpoint_dir = os.path.join(run_dir, f"checkpoint-{i}")
 
         # All-rank operations that must precede rank-0 I/O.
         _fsdp_model_state = _fsdp_optim_state = None
@@ -416,9 +436,12 @@ def pretrain(
             optim.consolidate_state_dict(to=0)
 
         if local_rank == 0 and do_checkpoint:
-            checkpoint_dir = os.path.join(run_dir, f"checkpoint-{i}")
+            _ckpt_t0 = time.time()
+            print(f"[iter {i}] checkpoint start", flush=True)
             os.makedirs(checkpoint_dir, exist_ok=True)
 
+            _t = time.time()
+            print(f"[iter {i}]   saving weights...", flush=True)
             if isinstance(net, FSDP):
                 save_file(_fsdp_model_state, os.path.join(checkpoint_dir, "model.safetensors"))
                 net.module.config.save_pretrained(checkpoint_dir)
@@ -435,104 +458,28 @@ def pretrain(
 
             with open(os.path.join(checkpoint_dir, "activations.json"), "w") as f:
                 json.dump(dict(activation_stats), f)
+            print(f"[iter {i}]   saving weights done ({time.time()-_t:.1f}s)", flush=True)
 
             eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            _t = time.time()
+            print(f"[iter {i}]   validation start...", flush=True)
             avg_val_loss, avg_val_ppl = run_validation(
                 eval_net, tokenizer, val_dataloader, device,
                 run_dir=run_dir, max_steps=num_val_iters, step=i,
             )
             net.train()
+            print(f"[iter {i}]   validation done ({time.time()-_t:.1f}s)", flush=True)
             wandb.log({"val_loss_avg": avg_val_loss, "val_perplexity_avg": avg_val_ppl}, step=i)
 
-            if eval_config is not None and tokenizer is not None:
-                num_runs = int(eval_config.get("num_runs", 1))
-                print(f"[iter {i}] Running lm-eval ({num_runs} run(s)): {eval_config['tasks']}")
-                eval_net.eval()
-                eval_results = run_lm_eval(eval_net, tokenizer, eval_config, device)
-                net.train()
-                eval_out = {
-                    "iter": i,
-                    "tasks": eval_config["tasks"],
-                    "num_fewshot": eval_config.get("num_fewshot", 0),
-                    "num_runs": num_runs,
-                    "results": eval_results,
-                }
-                with open(os.path.join(checkpoint_dir, "eval_results.json"), "w") as f:
-                    json.dump(eval_out, f, indent=2)
-                wandb_metrics = {}
-                for task, res in eval_results.items():
-                    for metric, agg in res.items():
-                        if not isinstance(agg, dict) or "min" not in agg:
-                            continue
-                        wandb_metrics[f"eval/{task}/{metric}/min"] = agg["min"]
-                        wandb_metrics[f"eval/{task}/{metric}/max"] = agg["max"]
-                        for run_idx, v in enumerate(agg["runs"]):
-                            if isinstance(v, (int, float)):
-                                wandb_metrics[f"eval/{task}/{metric}/run_{run_idx}"] = v
-                wandb.log(wandb_metrics, step=i)
-                print(f"[iter {i}] lm-eval saved → {checkpoint_dir}/eval_results.json")
-
-            skip_viz = resumed and i == start_iter
             if not skip_viz:
+                _t = time.time()
+                print(f"[iter {i}]   plot_visualizations start...", flush=True)
                 plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
-
-            if not skip_viz and num_visualize_generations > 0 and tokenizer is not None:
-                viz_batch, _, _ = next(iter(val_dataloader))
-                viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
-                viz_prompt = tokenizer.decode(viz_prompt_tokens)
-                eval_net.eval()
-                _, hidden_states_per_step = generate(
-                    viz_prompt, tokenizer, eval_net, device,
-                    max_output_length=num_visualize_generations,
-                    generation_folder="", checkpoint_path="", tokenizer_path="",
-                    collect_hidden_states=True,
-                )
-                net.train()
-
-                if hidden_states_per_step:
-                    from hyperviz import Visualizer
-                    from hyperviz.trajectory import Trajectory
-                    viz_dir = os.path.join(checkpoint_dir, "viz")
-                    visualizer = Visualizer(viz_dir)
-                    for step_hs in hidden_states_per_step:
-                        if step_hs is not None:
-                            visualizer.add(Trajectory(hidden_states=step_hs))
-                    visualizer.visualize()
-                    visualizer.clear()
-                    print(f"[iter {i}] hyperviz → {viz_dir}")
-
-            if not skip_viz and loss_viz_config is not None:
-                from hyperviz.loss_visualizer import LossVisualizer
-
-                class _LMCriterion(nn.Module):
-                    """Unwraps LMOutput and reshapes (B,T,V) logits for cross_entropy."""
-                    def forward(self, output, targets):
-                        logits = output.logits if hasattr(output, "logits") else output
-                        if logits.dim() == 3:
-                            B, T, V = logits.shape
-                            logits = logits.view(B * T, V)
-                            targets = targets.view(B * T)
-                        return F.cross_entropy(logits, targets)
-
-                loss_viz_dir = os.path.join(checkpoint_dir, "viz")
-                loss_visualizer = LossVisualizer(
-                    save_directory=loss_viz_dir,
-                    criterion=_LMCriterion(),
-                    grid_points=loss_viz_config.get("grid_points", 20),
-                    grid_range=loss_viz_config.get("grid_range", 1.0),
-                    eval_batches=loss_viz_config.get("eval_batches", 50),
-                    save_interactive_visualization=loss_viz_config.get("interactive", False),
-                )
-                activation_stats.clear()
-                eval_net.eval()
-                loss_visualizer.visualize(eval_net, val_dataloader, device)
-                del loss_visualizer
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                net.train()
-                print(f"[iter {i}] loss landscape → {loss_viz_dir}")
+                print(f"[iter {i}]   plot_visualizations done ({time.time()-_t:.1f}s)", flush=True)
 
             if not skip_viz and spectral_viz:
+                _t = time.time()
+                print(f"[iter {i}]   spectral viz start...", flush=True)
                 from hyperviz.spectral_visualizer import SpectralVisualizer
                 spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
                 sv = SpectralVisualizer(save_directory=spectral_viz_dir)
@@ -540,7 +487,7 @@ def pretrain(
                 with torch.no_grad():
                     sv.visualize(eval_net)
                 net.train()
-                print(f"[iter {i}] spectral viz → {spectral_viz_dir}/spectral_values/")
+                print(f"[iter {i}]   spectral viz done ({time.time()-_t:.1f}s) → {spectral_viz_dir}/spectral_values/", flush=True)
 
             log_history.append({
                 "step": i,
@@ -566,11 +513,137 @@ def pretrain(
                     json.dump(trainer_state, f, indent=2)
 
             print(
-                f"[iter {i}] loss={loss.item():.4f} ppl={train_ppl:.2f} "
+                f"[iter {i}] checkpoint done ({time.time()-_ckpt_t0:.1f}s) "
+                f"loss={loss.item():.4f} ppl={train_ppl:.2f} "
                 f"val_loss={avg_val_loss:.4f} val_ppl={avg_val_ppl:.2f} "
                 f"lr={current_lr:.2e} tokens={cumulative_tokens} "
-                f"→ {checkpoint_dir}"
+                f"→ {checkpoint_dir}",
+                flush=True,
             )
+
+        # Sync all ranks after rank-0 I/O before starting distributed visualization.
+        if do_checkpoint and dist.is_initialized():
+            dist.barrier()
+
+        # ---------------------------------------------------------------------------
+        # Distributed hyperviz — each rank generates from its own val prompt,
+        # all hidden-state trajectories are gathered to rank 0 for visualization.
+        # ---------------------------------------------------------------------------
+        if do_checkpoint and not skip_viz and num_visualize_generations > 0 and tokenizer is not None:
+            _t = time.time()
+            if local_rank == 0:
+                print(f"[iter {i}]   hyperviz start ({num_visualize_generations} tokens, "
+                      f"{dist.get_world_size() if dist.is_initialized() else 1} rank(s))...", flush=True)
+            _eval_net_viz = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            viz_batch, _, _ = next(iter(val_dataloader))
+            viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
+            viz_prompt = tokenizer.decode(viz_prompt_tokens)
+            _eval_net_viz.eval()
+            _, hidden_states_per_step = generate(
+                viz_prompt, tokenizer, _eval_net_viz, device,
+                max_output_length=num_visualize_generations,
+                generation_folder="", checkpoint_path="", tokenizer_path="",
+                collect_hidden_states=True,
+            )
+            net.train()
+
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                _all_steps = [None] * dist.get_world_size()
+                dist.all_gather_object(_all_steps, hidden_states_per_step or [])
+                combined_steps = [hs for rank_steps in _all_steps for hs in rank_steps]
+            else:
+                combined_steps = hidden_states_per_step or []
+
+            if local_rank == 0 and combined_steps:
+                from hyperviz import Visualizer
+                from hyperviz.trajectory import Trajectory
+                viz_dir = os.path.join(checkpoint_dir, "viz")
+                visualizer = Visualizer(viz_dir)
+                for step_hs in combined_steps:
+                    if step_hs is not None:
+                        visualizer.add(Trajectory(hidden_states=step_hs))
+                visualizer.visualize()
+                visualizer.clear()
+                print(f"[iter {i}]   hyperviz done ({time.time()-_t:.1f}s) → {viz_dir}", flush=True)
+
+        # ---------------------------------------------------------------------------
+        # Distributed loss landscape — grid cells are partitioned across ranks;
+        # rank 0 plots and saves.
+        # ---------------------------------------------------------------------------
+        if do_checkpoint and not skip_viz and loss_viz_config is not None:
+            _t = time.time()
+            if local_rank == 0:
+                print(f"[iter {i}]   loss landscape start...", flush=True)
+            from hyperviz.loss_visualizer import LossVisualizer
+
+            class _LMCriterion(nn.Module):
+                """Unwraps LMOutput and reshapes (B,T,V) logits for cross_entropy."""
+                def forward(self, output, targets):
+                    logits = output.logits if hasattr(output, "logits") else output
+                    if logits.dim() == 3:
+                        B, T, V = logits.shape
+                        logits = logits.view(B * T, V)
+                        targets = targets.view(B * T)
+                    return F.cross_entropy(logits, targets)
+
+            loss_viz_dir = os.path.join(checkpoint_dir, "viz")
+            loss_visualizer = LossVisualizer(
+                save_directory=loss_viz_dir,
+                criterion=_LMCriterion(),
+                grid_points=loss_viz_config.get("grid_points", 20),
+                grid_range=loss_viz_config.get("grid_range", 1.0),
+                eval_batches=loss_viz_config.get("eval_batches", 50),
+                save_interactive_visualization=loss_viz_config.get("interactive", False),
+            )
+            activation_stats.clear()
+            _eval_net_loss = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            _eval_net_loss.eval()
+            loss_visualizer.visualize(_eval_net_loss, val_dataloader, device)
+            del loss_visualizer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            net.train()
+            if local_rank == 0:
+                print(f"[iter {i}]   loss landscape done ({time.time()-_t:.1f}s) → {loss_viz_dir}", flush=True)
+
+        # lm-eval runs on ALL ranks so the work is distributed across GPUs.
+        # Only rank 0 saves results and logs to wandb.
+        if do_checkpoint and eval_config is not None and tokenizer is not None:
+            _eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            if local_rank == 0:
+                _num_runs = int(eval_config.get("num_runs", 1))
+                print(f"[iter {i}] Starting lm-eval on all ranks ({_num_runs} run(s)): {eval_config['tasks']}", flush=True)
+            _eval_net.eval()
+            eval_results = run_lm_eval(_eval_net, tokenizer, eval_config, device)
+            net.train()
+            if local_rank == 0:
+                _ckpt_dir = os.path.join(run_dir, f"checkpoint-{i}")
+                _num_runs = int(eval_config.get("num_runs", 1))
+                eval_out = {
+                    "iter": i,
+                    "tasks": eval_config["tasks"],
+                    "num_fewshot": eval_config.get("num_fewshot", 0),
+                    "num_runs": _num_runs,
+                    "results": eval_results,
+                }
+                with open(os.path.join(_ckpt_dir, "eval_results.json"), "w") as f:
+                    json.dump(eval_out, f, indent=2)
+                wandb_metrics = {}
+                for task, res in eval_results.items():
+                    for metric, agg in res.items():
+                        if not isinstance(agg, dict) or "min" not in agg:
+                            continue
+                        wandb_metrics[f"eval/{task}/{metric}/min"] = agg["min"]
+                        wandb_metrics[f"eval/{task}/{metric}/max"] = agg["max"]
+                        for run_idx, v in enumerate(agg["runs"]):
+                            if isinstance(v, (int, float)):
+                                wandb_metrics[f"eval/{task}/{metric}/run_{run_idx}"] = v
+                wandb.log(wandb_metrics, step=i)
+                print(f"[iter {i}] lm-eval saved → {_ckpt_dir}/eval_results.json")
+
+        # Wait for rank 0 to finish lm-eval logging before the next backward.
+        if do_checkpoint and dist.is_initialized():
+            dist.barrier()
 
         activation_stats.clear()
 
@@ -745,7 +818,8 @@ def main():
     if parallel_mode == "zero1":
         _param_groups = optim.param_groups
         _optim_class = type(optim)
-        _optim_defaults = dict(optim.defaults)
+        _sig_params = inspect.signature(_optim_class.__init__).parameters
+        _optim_defaults = {k: v for k, v in optim.defaults.items() if k in _sig_params}
         del optim
         optim = ZeroRedundancyOptimizer(_param_groups, optimizer_class=_optim_class, **_optim_defaults)
     warmup_steps = conf.get("warmup_steps", min(2000, conf["training_steps"] // 20))

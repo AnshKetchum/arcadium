@@ -1,0 +1,5 @@
+parameters:
+  name: "test-qwen"
+  architecture_config: "arcadium/models/qwen3/configs/qwen3-1.7b.yaml"
+  tokenizer:
+    config: configs/tokenizer/gpt-2.yaml

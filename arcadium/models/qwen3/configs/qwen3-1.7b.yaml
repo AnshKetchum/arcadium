@@ -1,5 +1,5 @@
 architecture: qwen3
-n_blocks: 28
+n_blocks: 20
 d_model: 2048
 n_query_heads: 16
 n_kv_heads: 8
