@@ -413,6 +413,7 @@ def pretrain(
             opt_mem = sum(
                 v.numel() * v.element_size()
                 for state in optim.state.values()
+                if state is not None
                 for v in state.values()
                 if torch.is_tensor(v)
             ) / (1024**2)

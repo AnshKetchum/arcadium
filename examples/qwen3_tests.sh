@@ -6,8 +6,8 @@ NNODES=1
 NODE_RANK=0
 
 
-NUM_DP_RANKS=7
-export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7
+NUM_DP_RANKS=8
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export BASE_RUN_DIR="checkpoints"
 export TOKENIZERS_PARALLELISM="false"
 
@@ -56,10 +56,10 @@ RUN_DIR_ARGS=(
 
 # To resume from a checkpoint, uncomment and set --load to the run directory.
 # The latest checkpoint-{N} inside it will be loaded automatically.
-# RESUME_ARGS=(
-#   --load checkpoints/nanogpt-speedrun-ablations-2026-04-19-01-41-08
-#   # --checkpoint checkpoint-2000 # omit to load the latest checkpoint automatically
-# )
+RESUME_ARGS=(
+  --load checkpoints/qwen3-100M-2026-05-07-03-02-39 
+  # --checkpoint checkpoint-2000 # omit to load the latest checkpoint automatically
+)
 
 # Generate timestamp
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
