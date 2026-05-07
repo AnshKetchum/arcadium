@@ -23,13 +23,13 @@ DATA_ARGS=(
 
 # Visualizations per checkpoint
 VIS_ARGS=(
-  --num-visualize-generations 20
-  --loss-viz
-  --loss-viz-grid-points 15
-  --loss-viz-eval-batches 10
-  --loss-viz-interactive 
-  --val-batch-size 4
-  --spectral-viz
+  # --num-visualize-generations 20
+  # --loss-viz
+  # --loss-viz-grid-points 15
+  # --loss-viz-eval-batches 10
+  # --loss-viz-interactive 
+  # --val-batch-size 4
+  # --spectral-viz
 )
 
 # Optional: run lm-eval at every checkpoint (remove to skip)

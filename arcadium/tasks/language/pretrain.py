@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 from collections import defaultdict
 import inspect
 import json
@@ -185,11 +186,12 @@ def run_lm_eval(net, tokenizer, eval_conf, device):
     return aggregated
 
 
-def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10, step=0):
+def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10, step=0, local_rank=0):
     """
-    Run validation for up to max_steps batches, then generate a few samples.
+    Run validation for up to max_steps batches on every rank in parallel, then
+    all-reduce the loss so all ranks share the same avg.  Only rank 0 generates
+    sample continuations and writes val_iter_{step}.json.
 
-    Saves generations to {run_dir}/generations/val_iter_{step}.json.
     Returns (avg_val_loss, avg_val_perplexity).
     """
     net.eval()
@@ -198,7 +200,7 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
     val_iterator = iter(val_dataloader)
 
     with torch.no_grad():
-        for _ in tqdm(range(max_steps), desc="Validation"):
+        for _ in tqdm(range(max_steps), desc="Validation", disable=local_rank != 0):
             try:
                 batch, labels, _ = next(val_iterator)
             except StopIteration:
@@ -208,30 +210,36 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
             val_loss_total += loss.item()
             n_batches += 1
 
+    # All-reduce so every rank gets the same aggregate loss.
+    if dist.is_initialized():
+        t = torch.tensor([val_loss_total, float(n_batches)], dtype=torch.float64, device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        val_loss_total, n_batches = t[0].item(), t[1].item()
+
     avg_loss = val_loss_total / max(1, n_batches)
 
-    generation_dir = os.path.join(run_dir, "generations")
-    os.makedirs(generation_dir, exist_ok=True)
-    generations = []
-    for gen_idx in range(3):
-        try:
-            val_batch, _, _ = next(val_iterator)
-        except StopIteration:
-            break
-        prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
-        prompt_text = tokenizer.decode(prompt_tokens)
-        output_text, _ = generate(
-            prompt_text, tokenizer, net, device,
-            max_output_length=50, generation_folder="",
-            checkpoint_path="", tokenizer_path="",
-        )
-        generations.append({
-            "iter": step, "generation_idx": gen_idx,
-            "prompt": prompt_text, "output": output_text,
-        })
-
-    with open(os.path.join(generation_dir, f"val_iter_{step}.json"), "w") as f:
-        json.dump(generations, f, indent=2)
+    if local_rank == 0 and tokenizer is not None:
+        generation_dir = os.path.join(run_dir, "generations")
+        os.makedirs(generation_dir, exist_ok=True)
+        generations = []
+        for gen_idx in range(3):
+            try:
+                val_batch, _, _ = next(val_iterator)
+            except StopIteration:
+                break
+            prompt_tokens = val_batch[0, : val_batch.shape[1] // 2].tolist()
+            prompt_text = tokenizer.decode(prompt_tokens)
+            output_text, _ = generate(
+                prompt_text, tokenizer, net, device,
+                max_output_length=50, generation_folder="",
+                checkpoint_path="", tokenizer_path="",
+            )
+            generations.append({
+                "iter": step, "generation_idx": gen_idx,
+                "prompt": prompt_text, "output": output_text,
+            })
+        with open(os.path.join(generation_dir, f"val_iter_{step}.json"), "w") as f:
+            json.dump(generations, f, indent=2)
 
     return avg_loss, math.exp(avg_loss)
 
@@ -267,6 +275,7 @@ def pretrain(
     local_rank=0,
     resumed=False,
     parallel_mode="ddp",
+    grad_accum_steps=1,
 ):
     """
     Main pretraining loop.
@@ -300,6 +309,7 @@ def pretrain(
         )
         print(f"Profiler armed: will capture iters [{profile_start}, {profile_end}] → {profile_dir}")
 
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
     activation_stats = defaultdict(list)
     hooks = register_activation_hooks(net, activation_stats)
     cumulative_tokens = cumulative_tokens_start
@@ -311,48 +321,72 @@ def pretrain(
         for name in _source_names
     }
 
-    print(f"Training started: iters {start_iter} → {num_iters}, device={device}" + (" (resumed)" if resumed else ""))
+    print(f"Training started: iters {start_iter} → {num_iters}, device={device}, "
+          f"grad_accum={grad_accum_steps}" + (" (resumed)" if resumed else ""), flush=True)
     for i in range(start_iter, num_iters):
-        optim.zero_grad()
-
-        t_batch = time.time()
-        try:
-            batch, labels, source_idx = next(data_iterator)
-        except StopIteration:
-            current_epoch += 1
-            if current_epoch >= num_epochs:
-                print(f"Data exhausted after {current_epoch} epoch(s) at step {i}.")
-                break
-            print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
-            data_iterator = iter(train_dataloader)
-            batch, labels, source_idx = next(data_iterator)
-        batch_load_time = time.time() - t_batch
-
-        # Accumulate per-source token counts (source_idx is a [B] int tensor)
-        _step_source_tokens: dict[str, int] = {}
-        seq_len = labels.shape[1]
-        for j, name in enumerate(_source_names):
-            n = int((source_idx == j).sum().item())
-            tokens = n * seq_len
-            _per_source_tokens[name] = _per_source_tokens.get(name, 0) + tokens
-            _step_source_tokens[name] = tokens
-
-        batch, labels = batch.to(device), labels.to(device)
-
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
 
-        t0 = time.time()
-        print(f"[rank {local_rank}] forward start (iter {i})", flush=True)
-        _, loss, metadata = training_step(net, batch=batch, labels=labels)
-        print(f"[rank {local_rank}] forward done (iter {i})", flush=True)
-        forward_time = time.time() - t0
+        # ── Gradient accumulation loop ────────────────────────────────────
+        # Each optimizer step consists of grad_accum_steps micro-batches.
+        # DDP/FSDP gradient all-reduces are suppressed until the final step.
+        _accum_loss = 0.0
+        _accum_metadata: dict = {}
+        _batch_load_time = 0.0
+        _step_source_tokens: dict[str, int] = {}
+        _step_tokens = 0
+        _last_seq_len = 0
+        _data_exhausted = False
 
-        t1 = time.time()
-        print(f"[rank {local_rank}] backward start (iter {i})", flush=True)
-        loss.backward()
-        print(f"[rank {local_rank}] backward done (iter {i})", flush=True)
-        backward_time = time.time() - t1
+        t_compute = time.time()
+        for _accum_step in range(grad_accum_steps):
+            t_batch = time.time()
+            try:
+                batch, labels, source_idx = next(data_iterator)
+            except StopIteration:
+                current_epoch += 1
+                if current_epoch >= num_epochs:
+                    print(f"Data exhausted after {current_epoch} epoch(s) at step {i}.")
+                    _data_exhausted = True
+                    break
+                print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
+                data_iterator = iter(train_dataloader)
+                batch, labels, source_idx = next(data_iterator)
+            _batch_load_time += time.time() - t_batch
+
+            _last_seq_len = labels.shape[1]
+            _step_tokens += labels.numel()
+
+            for j, name in enumerate(_source_names):
+                n = int((source_idx == j).sum().item())
+                tokens = n * _last_seq_len
+                _per_source_tokens[name] = _per_source_tokens.get(name, 0) + tokens
+                _step_source_tokens[name] = _step_source_tokens.get(name, 0) + tokens
+
+            batch, labels = batch.to(device), labels.to(device)
+
+            # Defer gradient sync to the last micro-step (DDP / FSDP).
+            _is_last_accum = (_accum_step == grad_accum_steps - 1)
+            _sync_ctx = (contextlib.nullcontext()
+                         if _is_last_accum
+                         else net.no_sync())
+
+            print(f"[rank {local_rank}] forward start (iter {i}, accum {_accum_step})", flush=True)
+            with _sync_ctx:
+                _, loss_step, metadata_step = training_step(net, batch=batch, labels=labels)
+                print(f"[rank {local_rank}] forward done, backward start "
+                      f"(iter {i}, accum {_accum_step})", flush=True)
+                (loss_step / grad_accum_steps).backward()
+            print(f"[rank {local_rank}] backward done (iter {i}, accum {_accum_step})", flush=True)
+
+            _accum_loss += loss_step.item()
+            if not _accum_metadata:
+                _accum_metadata = metadata_step
+
+        if _data_exhausted:
+            break
+
+        compute_time = time.time() - t_compute
 
         t2 = time.time()
         if isinstance(net, FSDP):
@@ -363,12 +397,16 @@ def pretrain(
         optim.step()
         print(f"[rank {local_rank}] optimizer step done (iter {i})", flush=True)
         scheduler.step()
+        # Free gradient tensors immediately — they've been consumed by the optimizer.
+        # This reclaims ~2× param memory before the checkpoint/validation block.
+        optim.zero_grad(set_to_none=True)
         optimizer_time = time.time() - t2
 
-        iter_time = forward_time + backward_time + optimizer_time
-        cumulative_tokens += labels.numel()
+        iter_time = compute_time + optimizer_time
+        loss_val = _accum_loss / grad_accum_steps
+        cumulative_tokens += _step_tokens
         current_lr = scheduler.get_last_lr()[0]
-        train_ppl = math.exp(loss.item())
+        train_ppl = math.exp(loss_val)
 
         if torch.cuda.is_available():
             param_mem = sum(p.numel() * p.element_size() for p in net.parameters()) / (1024**2)
@@ -386,13 +424,13 @@ def pretrain(
         total_activation_mem = sum(activation_stats.values())
 
         wandb_log = {
-            "lm_loss": loss.item(),
+            "lm_loss": loss_val,
             "train_perplexity": train_ppl,
             "learning_rate": current_lr,
             "iter_time": iter_time,
-            "batch_load_time": batch_load_time,
+            "batch_load_time": _batch_load_time,
             "cumulative_tokens": cumulative_tokens,
-            "train_sequence_length": batch.shape[1],
+            "train_sequence_length": _last_seq_len,
             "params_VRAM_MB": param_mem,
             "optimizer_state_VRAM_MB": opt_mem,
             "activations_VRAM_MB": total_activation_mem,
@@ -400,7 +438,7 @@ def pretrain(
             "peak_allocated_VRAM_MB": peak_mem,
         }
 
-        for k, v in metadata.items():
+        for k, v in _accum_metadata.items():
             if k.startswith("metrics/model/"):
                 wandb_log["model/" + k[len("metrics/model/"):]] = v
         for name in _source_names:
@@ -435,6 +473,7 @@ def pretrain(
         if do_checkpoint and isinstance(optim, ZeroRedundancyOptimizer):
             optim.consolidate_state_dict(to=0)
 
+        # Rank-0-only I/O: save weights, tokenizer, scheduler, activations.
         if local_rank == 0 and do_checkpoint:
             _ckpt_t0 = time.time()
             print(f"[iter {i}] checkpoint start", flush=True)
@@ -460,70 +499,88 @@ def pretrain(
                 json.dump(dict(activation_stats), f)
             print(f"[iter {i}]   saving weights done ({time.time()-_t:.1f}s)", flush=True)
 
+        # Sync all ranks after rank-0 I/O.
+        if do_checkpoint and dist.is_initialized():
+            dist.barrier()
+
+        # All-rank: validation (each rank runs its own batches; loss is all-reduced).
+        # All-rank: visualizations that can be parallelised across ranks.
+        if do_checkpoint:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+
             _t = time.time()
-            print(f"[iter {i}]   validation start...", flush=True)
+            if local_rank == 0:
+                print(f"[iter {i}]   validation start...", flush=True)
             avg_val_loss, avg_val_ppl = run_validation(
                 eval_net, tokenizer, val_dataloader, device,
                 run_dir=run_dir, max_steps=num_val_iters, step=i,
+                local_rank=local_rank,
             )
             net.train()
-            print(f"[iter {i}]   validation done ({time.time()-_t:.1f}s)", flush=True)
-            wandb.log({"val_loss_avg": avg_val_loss, "val_perplexity_avg": avg_val_ppl}, step=i)
+            if local_rank == 0:
+                print(f"[iter {i}]   validation done ({time.time()-_t:.1f}s)", flush=True)
+                wandb.log({"val_loss_avg": avg_val_loss, "val_perplexity_avg": avg_val_ppl}, step=i)
 
             if not skip_viz:
-                _t = time.time()
-                print(f"[iter {i}]   plot_visualizations start...", flush=True)
-                plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
-                print(f"[iter {i}]   plot_visualizations done ({time.time()-_t:.1f}s)", flush=True)
+                if local_rank == 0:
+                    _t = time.time()
+                    print(f"[iter {i}]   plot_visualizations start...", flush=True)
+                    plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
+                    print(f"[iter {i}]   plot_visualizations done ({time.time()-_t:.1f}s)", flush=True)
 
-            if not skip_viz and spectral_viz:
-                _t = time.time()
-                print(f"[iter {i}]   spectral viz start...", flush=True)
-                from hyperviz.spectral_visualizer import SpectralVisualizer
-                spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
-                sv = SpectralVisualizer(save_directory=spectral_viz_dir)
-                eval_net.eval()
-                with torch.no_grad():
-                    sv.visualize(eval_net)
-                net.train()
-                print(f"[iter {i}]   spectral viz done ({time.time()-_t:.1f}s) → {spectral_viz_dir}/spectral_values/", flush=True)
+                # Sync after any rank-0-only work above before entering the
+                # distributed spectral-viz collective (all_gather_object).
+                if spectral_viz and dist.is_initialized():
+                    dist.barrier()
 
-            log_history.append({
-                "step": i,
-                "epoch": round(i / num_iters, 4),
-                "loss": round(loss.item(), 4),
-                "perplexity": round(train_ppl, 4),
-                "val_loss": round(avg_val_loss, 4),
-                "val_perplexity": round(avg_val_ppl, 4),
-                "learning_rate": current_lr,
-                "cumulative_tokens": cumulative_tokens,
-                "source_tokens": dict(_per_source_tokens),
-                "iter_time": round(iter_time, 4),
-            })
-            trainer_state = {
-                "global_step": i,
-                "epoch": round(i / num_iters, 4),
-                "max_steps": num_iters,
-                "model_name": model_name,
-                "log_history": log_history,
-            }
-            for dest in [run_dir, checkpoint_dir]:
-                with open(os.path.join(dest, "trainer_state.json"), "w") as f:
-                    json.dump(trainer_state, f, indent=2)
+                if spectral_viz:
+                    _t = time.time()
+                    if local_rank == 0:
+                        print(f"[iter {i}]   spectral viz start...", flush=True)
+                    from hyperviz.spectral_visualizer import SpectralVisualizer
+                    spectral_viz_dir = os.path.join(checkpoint_dir, "viz")
+                    sv = SpectralVisualizer(save_directory=spectral_viz_dir)
+                    eval_net.eval()
+                    with torch.no_grad():
+                        sv.visualize(eval_net, rank=local_rank, world_size=world_size)
+                    net.train()
+                    if local_rank == 0:
+                        print(f"[iter {i}]   spectral viz done ({time.time()-_t:.1f}s) → {spectral_viz_dir}/spectral_values/", flush=True)
 
-            print(
-                f"[iter {i}] checkpoint done ({time.time()-_ckpt_t0:.1f}s) "
-                f"loss={loss.item():.4f} ppl={train_ppl:.2f} "
-                f"val_loss={avg_val_loss:.4f} val_ppl={avg_val_ppl:.2f} "
-                f"lr={current_lr:.2e} tokens={cumulative_tokens} "
-                f"→ {checkpoint_dir}",
-                flush=True,
-            )
+            if local_rank == 0:
+                log_history.append({
+                    "step": i,
+                    "epoch": round(i / num_iters, 4),
+                    "loss": round(loss_val, 4),
+                    "perplexity": round(train_ppl, 4),
+                    "val_loss": round(avg_val_loss, 4),
+                    "val_perplexity": round(avg_val_ppl, 4),
+                    "learning_rate": current_lr,
+                    "cumulative_tokens": cumulative_tokens,
+                    "source_tokens": dict(_per_source_tokens),
+                    "iter_time": round(iter_time, 4),
+                })
+                trainer_state = {
+                    "global_step": i,
+                    "epoch": round(i / num_iters, 4),
+                    "max_steps": num_iters,
+                    "model_name": model_name,
+                    "log_history": log_history,
+                }
+                for dest in [run_dir, checkpoint_dir]:
+                    with open(os.path.join(dest, "trainer_state.json"), "w") as f:
+                        json.dump(trainer_state, f, indent=2)
 
-        # Sync all ranks after rank-0 I/O before starting distributed visualization.
-        if do_checkpoint and dist.is_initialized():
-            dist.barrier()
+                print(
+                    f"[iter {i}] checkpoint done ({time.time()-_ckpt_t0:.1f}s) "
+                    f"loss={loss_val:.4f} ppl={train_ppl:.2f} "
+                    f"val_loss={avg_val_loss:.4f} val_ppl={avg_val_ppl:.2f} "
+                    f"lr={current_lr:.2e} tokens={cumulative_tokens} "
+                    f"→ {checkpoint_dir}",
+                    flush=True,
+                )
 
         # ---------------------------------------------------------------------------
         # Distributed hyperviz — each rank generates from its own val prompt,
@@ -794,6 +851,22 @@ def main():
         else:
             net = DDP(net, device_ids=[local_rank])
 
+    micro_batch_size = conf["micro_batch_size"]
+    global_batch_size = conf["global_batch_size"]
+    if use_distributed:
+        assert global_batch_size % (micro_batch_size * args.num_dp_ranks) == 0, (
+            f"global_batch_size ({global_batch_size}) must be divisible by "
+            f"micro_batch_size ({micro_batch_size}) * num_dp_ranks ({args.num_dp_ranks}) "
+            f"= {micro_batch_size * args.num_dp_ranks}"
+        )
+        grad_accum_steps = global_batch_size // (micro_batch_size * args.num_dp_ranks)
+    else:
+        assert global_batch_size % micro_batch_size == 0, (
+            f"global_batch_size ({global_batch_size}) must be divisible by "
+            f"micro_batch_size ({micro_batch_size})"
+        )
+        grad_accum_steps = global_batch_size // micro_batch_size
+
     train_seq = conf["training_sequence_length"]
     train_dataset = load_dataset(conf["training_data_config"], train_seq["start"],
                                  debug=args.verbose, val=False, tokenizer=tokenizer)
@@ -801,18 +874,20 @@ def main():
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
     else:
         train_sampler = SequenceLengthSampler(
-            len(train_dataset), conf["batch_size"],
+            len(train_dataset), micro_batch_size,
             train_seq["start"], train_seq["end"], train_seq["steps"],
             name="train_scheduler", shuffle=False,
         )
-    train_dataloader = DataLoader(train_dataset, batch_size=conf["batch_size"],
+    train_dataloader = DataLoader(train_dataset, batch_size=micro_batch_size,
                                   num_workers=conf["num_workers"], sampler=train_sampler)
 
     val_dataset = load_dataset(conf["validation_data_config"], conf["validation_sequence_length"],
                                debug=args.verbose, val=True, tokenizer=tokenizer)
-    val_batch_size = args.val_batch_size if args.val_batch_size is not None else conf["batch_size"]
+    val_batch_size = args.val_batch_size if args.val_batch_size is not None else micro_batch_size
+    # num_workers=0 avoids spawning 7×N worker processes simultaneously when all
+    # ranks start validation at the same time, which can trigger the OOM killer.
     val_dataloader = DataLoader(val_dataset, batch_size=val_batch_size,
-                                shuffle=True, num_workers=conf["num_workers"])
+                                shuffle=True, num_workers=0)
 
     optim = load_optimizer(net, **conf["optimizer"])
     if parallel_mode == "zero1":
@@ -864,7 +939,9 @@ def main():
             name=f"{conf['run_name']}{resume_info}",
             config={
                 "model": name,
-                "batch_size": conf["batch_size"],
+                "micro_batch_size": micro_batch_size,
+                "global_batch_size": global_batch_size,
+                "grad_accum_steps": grad_accum_steps,
                 "sequence_length": conf["sequence_length"],
                 "lr": conf["lr"],
                 "num_iters": conf["training_steps"],
@@ -908,6 +985,7 @@ def main():
         local_rank=local_rank,
         resumed=args.load is not None and start_iter > 0,
         parallel_mode=parallel_mode,
+        grad_accum_steps=grad_accum_steps,
     )
 
     if use_distributed:

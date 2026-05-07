@@ -3,7 +3,8 @@ parameters:
   epochs: 1000
   val_steps: 10
   checkpoint_frequency: 100
-  batch_size: 2
+  micro_batch_size: 2
+  global_batch_size: 2
   num_workers: 0
   sequence_length: 32
   lr: 0.001

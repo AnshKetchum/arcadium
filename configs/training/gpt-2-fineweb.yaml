@@ -5,7 +5,8 @@ parameters:
   epochs: 4
   val_steps: 10
   checkpoint_frequency: 1000  # keeping as requested
-  batch_size: 32              # increased from 8
+  micro_batch_size: 4         # per-GPU per-forward-pass
+  global_batch_size: 224     # = micro * 7 GPUs * 8 accum steps
   num_workers: 4              # keeping as requested
   sequence_length: 1024       # increased from 32
   lr: 3e-4
