@@ -50,6 +50,10 @@ PARALLELISM_ARGS=(
   --parallel-mode zero1
 )
 
+OPTIMIZATION_ARGS=(
+  --compile
+)
+
 RUN_DIR_ARGS=(
   --base-run-dir "${BASE_RUN_DIR}"
 )
@@ -57,7 +61,7 @@ RUN_DIR_ARGS=(
 # To resume from a checkpoint, uncomment and set --load to the run directory.
 # The latest checkpoint-{N} inside it will be loaded automatically.
 RESUME_ARGS=(
-  --load checkpoints/qwen3-100M-2026-05-07-03-02-39 
+  --load checkpoints/qwen3-100M-2026-05-07-03-02-39
   # --checkpoint checkpoint-2000 # omit to load the latest checkpoint automatically
 )
 
@@ -82,5 +86,6 @@ torchrun "${TORCHRUN_ARGS[@]}" \
   "${EVAL_ARGS[@]}" \
   "${PARALLELISM_ARGS[@]}" \
   "${RUN_DIR_ARGS[@]}" \
+  "${OPTIMIZATION_ARGS[@]}" \
   "${RESUME_ARGS[@]}" 2>&1 | tee "logs/out_${TIMESTAMP}.log"
   

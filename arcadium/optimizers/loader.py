@@ -18,11 +18,16 @@ def load_optimizer(net, name="adamw", **kwargs):
     name = (name or "adamw").lower()
 
     if name in ("adam", "adamw"):
+        import torch
         lr = float(kwargs.get("lr", 3e-4))
         weight_decay = float(kwargs.get("weight_decay", 0.1))
         betas = tuple(kwargs.get("betas", (0.9, 0.95)))
         eps = float(kwargs.get("eps", 1e-8))
-        return AdamW(net.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        # Fused AdamW is a single CUDA kernel over all params instead of a
+        # python loop with foreach; meaningful speedup at >100M params.
+        fused = bool(kwargs.get("fused", torch.cuda.is_available()))
+        return AdamW(net.parameters(), lr=lr, betas=betas, eps=eps,
+                     weight_decay=weight_decay, fused=fused)
 
     if name == "muon":
         lr = float(kwargs.get("lr", 0.02))

@@ -22,6 +22,7 @@ from arcadium.data.sequence_length import SequenceLengthSampler
 from arcadium.optimizers.loader import load_optimizer
 from arcadium.utils import load_config
 from arcadium.utils.hooks import register_activation_hooks
+from arcadium.utils.mfu import compute_forward_flops, device_peak_bf16_tflops
 from arcadium.utils.visualize import plot_visualizations
 from arcadium.tasks.language.generate import generate
 from dotenv import load_dotenv
@@ -36,6 +37,32 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictTy
 from torch.distributed.optim import ZeroRedundancyOptimizer
 
 load_dotenv()
+
+
+def _unwrap(net):
+    """Strip DDP, FSDP, and torch.compile wrappers to get the bare nn.Module.
+
+    Order matters: DDP/FSDP wrap an OptimizedModule (when --compile is on),
+    so unwrap DDP first, then peel off `_orig_mod` from the compiled wrapper.
+    """
+    if isinstance(net, (DDP, FSDP)):
+        net = net.module
+    if hasattr(net, "_orig_mod"):
+        net = net._orig_mod
+    return net
+
+
+def _eval_module(net):
+    """Module to use for inference (validation, generation, viz).
+
+    For FSDP we keep the wrapper because parameters are sharded and only the
+    FSDP forward knows how to all-gather them. Otherwise we peel DDP and the
+    torch.compile wrapper so eval doesn't drag along DDP collectives or trigger
+    unnecessary recompilation on shape/mode changes.
+    """
+    if isinstance(net, FSDP):
+        return net
+    return _unwrap(net)
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +108,9 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler, parallel_mode="ddp"):
                                   FullStateDictConfig(rank0_only=False)):
             net.load_state_dict(state_dict)
     else:
-        raw_net = net.module if isinstance(net, DDP) else net
-        raw_net.load_state_dict(load_file(weights_path))
+        # _unwrap strips DDP and torch.compile so the saved checkpoint (which
+        # has bare-module keys) loads cleanly regardless of wrappers.
+        _unwrap(net).load_state_dict(load_file(weights_path))
 
     opt_path = os.path.join(checkpoint_dir, "optimizer.pt")
     print(f"Attempting to load {opt_path}")
@@ -108,14 +136,27 @@ def load_checkpoint(checkpoint_dir, net, optim, scheduler, parallel_mode="ddp"):
 # Training utilities
 # ---------------------------------------------------------------------------
 
-def training_step(net, batch, labels):
-    """Forward pass. Returns (logits, loss, metadata)."""
+def training_step(net, batch, labels, fwd_events=None):
+    """Forward pass + CE loss. Returns (logits, loss, metadata).
+
+    If `fwd_events` is provided, it is a (start, end) pair of `torch.cuda.Event`s
+    that are recorded around the forward pass so callers can measure GPU
+    forward time later via `start.elapsed_time(end)`. Recording events is
+    nearly free; reading their elapsed time forces a device sync, so do that
+    only on log iterations.
+    """
+    if fwd_events is not None:
+        fwd_events[0].record()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         output = net(batch)
+    if fwd_events is not None:
+        fwd_events[1].record()
     logits = output.logits if hasattr(output, "logits") else output
     metadata = output.metadata if hasattr(output, "metadata") else {}
     B, T, V = logits.shape
-    loss = F.cross_entropy(logits.float().view(B * T, V), labels.view(B * T))
+    # CE on bf16 logits; the kernel reduces in fp32 internally without
+    # materializing a full fp32 [B,T,V] tensor (was ~10 GB at V=151936, T=4096, B=4).
+    loss = F.cross_entropy(logits.view(B * T, V), labels.view(B * T))
     return logits, loss, metadata
 
 
@@ -192,13 +233,17 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
     all-reduce the loss so all ranks share the same avg.  Only rank 0 generates
     sample continuations and writes val_iter_{step}.json.
 
-    Returns (avg_val_loss, avg_val_perplexity).
+    Returns (avg_val_loss, avg_val_perplexity, eval_loop_time_s, generation_time_s).
+    `eval_loop_time_s` excludes the rank-0 generation (only the val batch loop +
+    all-reduce). `generation_time_s` is rank-0 generate() wall clock; 0.0 on
+    other ranks.
     """
     net.eval()
     val_loss_total = 0.0
     n_batches = 0
     val_iterator = iter(val_dataloader)
 
+    _eval_t0 = time.time()
     with torch.no_grad():
         for _ in tqdm(range(max_steps), desc="Validation", disable=local_rank != 0):
             try:
@@ -216,12 +261,15 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         val_loss_total, n_batches = t[0].item(), t[1].item()
 
+    eval_loop_time_s = time.time() - _eval_t0
     avg_loss = val_loss_total / max(1, n_batches)
 
+    generation_time_s = 0.0
     if local_rank == 0 and tokenizer is not None:
         generation_dir = os.path.join(run_dir, "generations")
         os.makedirs(generation_dir, exist_ok=True)
         generations = []
+        _gen_t0 = time.time()
         for gen_idx in range(3):
             try:
                 val_batch, _, _ = next(val_iterator)
@@ -238,10 +286,11 @@ def run_validation(net, tokenizer, val_dataloader, device, run_dir, max_steps=10
                 "iter": step, "generation_idx": gen_idx,
                 "prompt": prompt_text, "output": output_text,
             })
+        generation_time_s = time.time() - _gen_t0
         with open(os.path.join(generation_dir, f"val_iter_{step}.json"), "w") as f:
             json.dump(generations, f, indent=2)
 
-    return avg_loss, math.exp(avg_loss)
+    return avg_loss, math.exp(avg_loss), eval_loop_time_s, generation_time_s
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +325,10 @@ def pretrain(
     resumed=False,
     parallel_mode="ddp",
     grad_accum_steps=1,
+    enable_viz=False,
+    log_freq=50,
+    forward_flops_per_microbatch=0,
+    peak_bf16_tflops_per_gpu=0.0,
 ):
     """
     Main pretraining loop.
@@ -310,8 +363,10 @@ def pretrain(
         print(f"Profiler armed: will capture iters [{profile_start}, {profile_end}] → {profile_dir}")
 
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    activation_stats = defaultdict(list)
-    hooks = register_activation_hooks(net, activation_stats)
+    activation_stats: dict = defaultdict(list)
+    # Activation hooks add Python overhead per submodule per forward and inhibit
+    # kernel fusion. Only register them when viz is explicitly requested.
+    hooks = register_activation_hooks(net, activation_stats) if enable_viz else []
     cumulative_tokens = cumulative_tokens_start
     log_history = []
 
@@ -323,20 +378,32 @@ def pretrain(
 
     print(f"Training started: iters {start_iter} → {num_iters}, device={device}, "
           f"grad_accum={grad_accum_steps}" + (" (resumed)" if resumed else ""), flush=True)
+    # One-time computations: param memory is fixed for the run; optimizer state
+    # memory is fixed once the first step has populated it. We log both lazily.
+    _param_mem_mb = (
+        sum(p.numel() * p.element_size() for p in net.parameters()) / (1024 ** 2)
+        if torch.cuda.is_available() else 0.0
+    )
+    _opt_mem_mb_cached = 0.0
+
     for i in range(start_iter, num_iters):
-        if torch.cuda.is_available():
+        _is_log_iter = (local_rank == 0) and (i % log_freq == 0 or i == num_iters - 1)
+        if torch.cuda.is_available() and _is_log_iter:
             torch.cuda.reset_peak_memory_stats(device)
 
         # ── Gradient accumulation loop ────────────────────────────────────
         # Each optimizer step consists of grad_accum_steps micro-batches.
         # DDP/FSDP gradient all-reduces are suppressed until the final step.
-        _accum_loss = 0.0
+        # Loss is accumulated as a device tensor — no per-microstep .item() sync.
+        _accum_loss_dev = torch.zeros((), device=device, dtype=torch.float32)
         _accum_metadata: dict = {}
         _batch_load_time = 0.0
         _step_source_tokens: dict[str, int] = {}
         _step_tokens = 0
         _last_seq_len = 0
         _data_exhausted = False
+        _step_fwd_event_pairs: list[tuple] = []
+        _step_bwd_event_pairs: list[tuple] = []
 
         t_compute = time.time()
         for _accum_step in range(grad_accum_steps):
@@ -346,10 +413,12 @@ def pretrain(
             except StopIteration:
                 current_epoch += 1
                 if current_epoch >= num_epochs:
-                    print(f"Data exhausted after {current_epoch} epoch(s) at step {i}.")
+                    if local_rank == 0:
+                        print(f"Data exhausted after {current_epoch} epoch(s) at step {i}.")
                     _data_exhausted = True
                     break
-                print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
+                if local_rank == 0:
+                    print(f"Starting epoch {current_epoch + 1}/{num_epochs} at step {i}.")
                 data_iterator = iter(train_dataloader)
                 batch, labels, source_idx = next(data_iterator)
             _batch_load_time += time.time() - t_batch
@@ -357,13 +426,17 @@ def pretrain(
             _last_seq_len = labels.shape[1]
             _step_tokens += labels.numel()
 
-            for j, name in enumerate(_source_names):
-                n = int((source_idx == j).sum().item())
-                tokens = n * _last_seq_len
-                _per_source_tokens[name] = _per_source_tokens.get(name, 0) + tokens
-                _step_source_tokens[name] = _step_source_tokens.get(name, 0) + tokens
+            # source_idx is a CPU tensor from the dataloader; bincount avoids a
+            # python loop with .item() calls per source.
+            if _source_names:
+                counts = torch.bincount(source_idx.view(-1), minlength=len(_source_names)).tolist()
+                for j, name in enumerate(_source_names):
+                    tokens = counts[j] * _last_seq_len
+                    _per_source_tokens[name] = _per_source_tokens.get(name, 0) + tokens
+                    _step_source_tokens[name] = _step_source_tokens.get(name, 0) + tokens
 
-            batch, labels = batch.to(device), labels.to(device)
+            batch = batch.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             # Defer gradient sync to the last micro-step (DDP / FSDP).
             _is_last_accum = (_accum_step == grad_accum_steps - 1)
@@ -371,15 +444,35 @@ def pretrain(
                          if _is_last_accum
                          else net.no_sync())
 
-            print(f"[rank {local_rank}] forward start (iter {i}, accum {_accum_step})", flush=True)
-            with _sync_ctx:
-                _, loss_step, metadata_step = training_step(net, batch=batch, labels=labels)
-                print(f"[rank {local_rank}] forward done, backward start "
-                      f"(iter {i}, accum {_accum_step})", flush=True)
-                (loss_step / grad_accum_steps).backward()
-            print(f"[rank {local_rank}] backward done (iter {i}, accum {_accum_step})", flush=True)
+            # Per-microstep CUDA events around forward and backward — read
+            # elapsed time on log iters so we don't sync every step. The
+            # backward window includes DDP/FSDP gradient all-reduces on the
+            # final accum step (no_sync suppresses comm on earlier ones).
+            if torch.cuda.is_available() and _is_log_iter:
+                _fwd_events = (torch.cuda.Event(enable_timing=True),
+                               torch.cuda.Event(enable_timing=True))
+                _bwd_events = (torch.cuda.Event(enable_timing=True),
+                               torch.cuda.Event(enable_timing=True))
+            else:
+                _fwd_events = None
+                _bwd_events = None
 
-            _accum_loss += loss_step.item()
+            with _sync_ctx:
+                _, loss_step, metadata_step = training_step(
+                    net, batch=batch, labels=labels, fwd_events=_fwd_events,
+                )
+                if _bwd_events is not None:
+                    _bwd_events[0].record()
+                (loss_step / grad_accum_steps).backward()
+                if _bwd_events is not None:
+                    _bwd_events[1].record()
+
+            if _fwd_events is not None:
+                _step_fwd_event_pairs.append(_fwd_events)
+            if _bwd_events is not None:
+                _step_bwd_event_pairs.append(_bwd_events)
+
+            _accum_loss_dev = _accum_loss_dev + loss_step.detach().float()
             if not _accum_metadata:
                 _accum_metadata = metadata_step
 
@@ -393,9 +486,7 @@ def pretrain(
             net.clip_grad_norm_(max_norm=1.0)
         else:
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-        print(f"[rank {local_rank}] optimizer step start (iter {i})", flush=True)
         optim.step()
-        print(f"[rank {local_rank}] optimizer step done (iter {i})", flush=True)
         scheduler.step()
         # Free gradient tensors immediately — they've been consumed by the optimizer.
         # This reclaims ~2× param memory before the checkpoint/validation block.
@@ -403,49 +494,118 @@ def pretrain(
         optimizer_time = time.time() - t2
 
         iter_time = compute_time + optimizer_time
-        loss_val = _accum_loss / grad_accum_steps
         cumulative_tokens += _step_tokens
         current_lr = scheduler.get_last_lr()[0]
+
+        # Single sync per step (not per microstep) for loss readout.
+        loss_val = (_accum_loss_dev / grad_accum_steps).item()
         train_ppl = math.exp(loss_val)
 
-        if torch.cuda.is_available():
-            param_mem = sum(p.numel() * p.element_size() for p in net.parameters()) / (1024**2)
-            opt_mem = sum(
-                v.numel() * v.element_size()
-                for state in optim.state.values()
-                if state is not None
-                for v in state.values()
-                if torch.is_tensor(v)
-            ) / (1024**2)
-            allocated_mem = torch.cuda.memory_allocated(device) / (1024**2)
-            peak_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
-        else:
-            param_mem = opt_mem = allocated_mem = peak_mem = 0.0
+        if _is_log_iter:
+            if torch.cuda.is_available():
+                # Optimizer state dict walk is O(num_params) Python work; cache it.
+                if _opt_mem_mb_cached == 0.0:
+                    _opt_mem_mb_cached = sum(
+                        v.numel() * v.element_size()
+                        for state in optim.state.values()
+                        if state is not None
+                        for v in state.values()
+                        if torch.is_tensor(v)
+                    ) / (1024 ** 2)
+                allocated_mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
+                peak_mem = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            else:
+                allocated_mem = peak_mem = 0.0
 
-        total_activation_mem = sum(activation_stats.values())
+            total_activation_mem = sum(activation_stats.values()) if enable_viz else 0.0
 
-        wandb_log = {
-            "lm_loss": loss_val,
-            "train_perplexity": train_ppl,
-            "learning_rate": current_lr,
-            "iter_time": iter_time,
-            "batch_load_time": _batch_load_time,
-            "cumulative_tokens": cumulative_tokens,
-            "train_sequence_length": _last_seq_len,
-            "params_VRAM_MB": param_mem,
-            "optimizer_state_VRAM_MB": opt_mem,
-            "activations_VRAM_MB": total_activation_mem,
-            "allocated_VRAM_MB": allocated_mem,
-            "peak_allocated_VRAM_MB": peak_mem,
-        }
+            # Sum GPU forward + backward time across the microbatches in this
+            # step. The first elapsed_time() call forces a device sync; that's
+            # fine because we only do it on log iters.
+            forward_time_s = 0.0
+            backward_time_s = 0.0
+            if _step_fwd_event_pairs:
+                # Sync once on the earliest event — all subsequent reads are
+                # then guaranteed to have completed.
+                _step_fwd_event_pairs[0][0].synchronize()
+                forward_time_s = sum(
+                    s.elapsed_time(e) for s, e in _step_fwd_event_pairs
+                ) / 1000.0
+            if _step_bwd_event_pairs:
+                backward_time_s = sum(
+                    s.elapsed_time(e) for s, e in _step_bwd_event_pairs
+                ) / 1000.0
 
-        for k, v in _accum_metadata.items():
-            if k.startswith("metrics/model/"):
-                wandb_log["model/" + k[len("metrics/model/"):]] = v
-        for name in _source_names:
-            wandb_log[f"data/{name}/tokens"] = _step_source_tokens.get(name, 0)
-            wandb_log[f"data/{name}/cumulative_tokens"] = _per_source_tokens.get(name, 0)
-        if local_rank == 0:
+            # Residual time not captured by forward/backward/optimizer/data.
+            # Includes Python overhead, grad clip, lr scheduler, accum_loss
+            # bookkeeping, and any unattributed CUDA work.
+            other_time_s = max(
+                0.0,
+                iter_time - forward_time_s - backward_time_s
+                - optimizer_time - _batch_load_time,
+            )
+
+            forward_tflops_per_sec = 0.0
+            forward_mfu_frac = 0.0
+            if forward_flops_per_microbatch > 0 and forward_time_s > 0:
+                # Per-rank achieved FLOPs across all microbatches in this step.
+                step_fwd_flops = forward_flops_per_microbatch * grad_accum_steps
+                forward_tflops_per_sec = step_fwd_flops / forward_time_s / 1e12
+                if peak_bf16_tflops_per_gpu > 0:
+                    forward_mfu_frac = forward_tflops_per_sec / peak_bf16_tflops_per_gpu
+
+            wandb_log = {
+                # Top-level: training quality + scheduler.
+                "lm_loss": loss_val,
+                "train_perplexity": train_ppl,
+                "learning_rate": current_lr,
+
+                # data/* — what the model has seen, GLOBALLY (across all
+                # ranks). The internal `cumulative_tokens` variable is
+                # per-rank; we multiply by world_size on the way out so the
+                # number in wandb is the total tokens trained on, which is
+                # what people actually want to read.
+                "data/cumulative_tokens": cumulative_tokens * world_size,
+                "data/cumulative_tokens_per_rank": cumulative_tokens,
+                "data/tokens_this_step": _step_tokens * world_size,
+                "data/sequence_length": _last_seq_len,
+
+                # timing/* — wall-clock and throughput. The first five sum to
+                # iter_time by construction (other_time is the residual).
+                "timing/iter_time": iter_time,
+                "timing/forward_time": forward_time_s,
+                "timing/backward_time": backward_time_s,
+                "timing/optimizer_time": optimizer_time,
+                "timing/batch_load_time": _batch_load_time,
+                "timing/other_time": other_time_s,
+                "timing/tokens_per_sec": _step_tokens / max(iter_time, 1e-9),
+
+                # compute/* — FLOPs and MFU.
+                "compute/forward_flops_per_step": (
+                    forward_flops_per_microbatch * grad_accum_steps
+                ),
+                "compute/forward_tflops_per_sec": forward_tflops_per_sec,
+                "compute/forward_mfu": forward_mfu_frac,
+                "compute/peak_bf16_tflops_per_gpu": peak_bf16_tflops_per_gpu,
+
+                # vram/* — memory footprint.
+                "vram/params_MB": _param_mem_mb,
+                "vram/optimizer_state_MB": _opt_mem_mb_cached,
+                "vram/activations_MB": total_activation_mem,
+                "vram/allocated_MB": allocated_mem,
+                "vram/peak_allocated_MB": peak_mem,
+            }
+
+            for k, v in _accum_metadata.items():
+                if k.startswith("metrics/model/"):
+                    wandb_log["model/" + k[len("metrics/model/"):]] = v
+            for name in _source_names:
+                # Per-source values are also globalized via world_size. They
+                # have small variance vs a true all-reduce because each rank
+                # samples sources independently, but the categorical
+                # distribution averages out over time.
+                wandb_log[f"data/{name}/tokens"] = _step_source_tokens.get(name, 0) * world_size
+                wandb_log[f"data/{name}/cumulative_tokens"] = _per_source_tokens.get(name, 0) * world_size
             wandb.log(wandb_log, step=i)
 
         if profiler is not None and i == profile_start:
@@ -474,6 +634,10 @@ def pretrain(
         if do_checkpoint and isinstance(optim, ZeroRedundancyOptimizer):
             optim.consolidate_state_dict(to=0)
 
+        # Per-phase wall clocks, populated below. Emitted to wandb under
+        # timing/checkpoint/* once all phases complete.
+        _phase_times: dict[str, float] = {}
+
         # Rank-0-only I/O: save weights, tokenizer, scheduler, activations.
         if local_rank == 0 and do_checkpoint:
             _ckpt_t0 = time.time()
@@ -484,11 +648,12 @@ def pretrain(
             print(f"[iter {i}]   saving weights...", flush=True)
             if isinstance(net, FSDP):
                 save_file(_fsdp_model_state, os.path.join(checkpoint_dir, "model.safetensors"))
-                net.module.config.save_pretrained(checkpoint_dir)
+                _unwrap(net).config.save_pretrained(checkpoint_dir)
                 torch.save(_fsdp_optim_state, os.path.join(checkpoint_dir, "optimizer.pt"))
             else:
-                raw_net = net.module if isinstance(net, DDP) else net
-                raw_net.save_pretrained(checkpoint_dir, safe_serialization=True)
+                # Save the bare module (no DDP / no compile prefix) so checkpoints
+                # remain portable across compile on/off and across parallel modes.
+                _unwrap(net).save_pretrained(checkpoint_dir, safe_serialization=True)
                 torch.save(optim.state_dict(), os.path.join(checkpoint_dir, "optimizer.pt"))
 
             if tokenizer is not None:
@@ -498,7 +663,8 @@ def pretrain(
 
             with open(os.path.join(checkpoint_dir, "activations.json"), "w") as f:
                 json.dump(dict(activation_stats), f)
-            print(f"[iter {i}]   saving weights done ({time.time()-_t:.1f}s)", flush=True)
+            _phase_times["save"] = time.time() - _t
+            print(f"[iter {i}]   saving weights done ({_phase_times['save']:.1f}s)", flush=True)
 
         # Sync all ranks after rank-0 I/O.
         if do_checkpoint and dist.is_initialized():
@@ -509,19 +675,23 @@ def pretrain(
         if do_checkpoint:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            eval_net = _eval_module(net)
 
             _t = time.time()
             if local_rank == 0:
                 print(f"[iter {i}]   validation start...", flush=True)
-            avg_val_loss, avg_val_ppl = run_validation(
+            avg_val_loss, avg_val_ppl, _val_loop_s, _val_gen_s = run_validation(
                 eval_net, tokenizer, val_dataloader, device,
                 run_dir=run_dir, max_steps=num_val_iters, step=i,
                 local_rank=local_rank,
             )
             net.train()
+            _phase_times["validation_total"] = time.time() - _t
+            _phase_times["validation_eval_loop"] = _val_loop_s
+            _phase_times["validation_generation"] = _val_gen_s
             if local_rank == 0:
-                print(f"[iter {i}]   validation done ({time.time()-_t:.1f}s)", flush=True)
+                print(f"[iter {i}]   validation done ({_phase_times['validation_total']:.1f}s "
+                      f"= eval {_val_loop_s:.1f}s + gen {_val_gen_s:.1f}s)", flush=True)
                 wandb.log({"val_loss_avg": avg_val_loss, "val_perplexity_avg": avg_val_ppl}, step=i)
 
             if not skip_viz:
@@ -529,7 +699,9 @@ def pretrain(
                     _t = time.time()
                     print(f"[iter {i}]   plot_visualizations start...", flush=True)
                     plot_visualizations(eval_net, os.path.join(run_dir, "visualizations"), i)
-                    print(f"[iter {i}]   plot_visualizations done ({time.time()-_t:.1f}s)", flush=True)
+                    _phase_times["plot_visualizations"] = time.time() - _t
+                    print(f"[iter {i}]   plot_visualizations done "
+                          f"({_phase_times['plot_visualizations']:.1f}s)", flush=True)
 
                 # Sync after any rank-0-only work above before entering the
                 # distributed spectral-viz collective (all_gather_object).
@@ -547,8 +719,10 @@ def pretrain(
                     with torch.no_grad():
                         sv.visualize(eval_net, rank=local_rank, world_size=world_size)
                     net.train()
+                    _phase_times["spectral_viz"] = time.time() - _t
                     if local_rank == 0:
-                        print(f"[iter {i}]   spectral viz done ({time.time()-_t:.1f}s) → {spectral_viz_dir}/spectral_values/", flush=True)
+                        print(f"[iter {i}]   spectral viz done ({_phase_times['spectral_viz']:.1f}s) "
+                              f"→ {spectral_viz_dir}/spectral_values/", flush=True)
 
             if local_rank == 0:
                 log_history.append({
@@ -578,7 +752,8 @@ def pretrain(
                     f"[iter {i}] checkpoint done ({time.time()-_ckpt_t0:.1f}s) "
                     f"loss={loss_val:.4f} ppl={train_ppl:.2f} "
                     f"val_loss={avg_val_loss:.4f} val_ppl={avg_val_ppl:.2f} "
-                    f"lr={current_lr:.2e} tokens={cumulative_tokens} "
+                    f"lr={current_lr:.2e} tokens={cumulative_tokens * world_size:,} "
+                    f"(per-rank {cumulative_tokens:,}) "
                     f"→ {checkpoint_dir}",
                     flush=True,
                 )
@@ -592,7 +767,7 @@ def pretrain(
             if local_rank == 0:
                 print(f"[iter {i}]   hyperviz start ({num_visualize_generations} tokens, "
                       f"{dist.get_world_size() if dist.is_initialized() else 1} rank(s))...", flush=True)
-            _eval_net_viz = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            _eval_net_viz = _eval_module(net)
             viz_batch, _, _ = next(iter(val_dataloader))
             viz_prompt_tokens = viz_batch[0, :viz_batch.shape[1] // 2].tolist()
             viz_prompt = tokenizer.decode(viz_prompt_tokens)
@@ -622,7 +797,8 @@ def pretrain(
                         visualizer.add(Trajectory(hidden_states=step_hs))
                 visualizer.visualize()
                 visualizer.clear()
-                print(f"[iter {i}]   hyperviz done ({time.time()-_t:.1f}s) → {viz_dir}", flush=True)
+                _phase_times["hyperviz"] = time.time() - _t
+                print(f"[iter {i}]   hyperviz done ({_phase_times['hyperviz']:.1f}s) → {viz_dir}", flush=True)
 
         # ---------------------------------------------------------------------------
         # Distributed loss landscape — grid cells are partitioned across ranks;
@@ -654,26 +830,29 @@ def pretrain(
                 save_interactive_visualization=loss_viz_config.get("interactive", False),
             )
             activation_stats.clear()
-            _eval_net_loss = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            _eval_net_loss = _eval_module(net)
             _eval_net_loss.eval()
             loss_visualizer.visualize(_eval_net_loss, val_dataloader, device)
             del loss_visualizer
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             net.train()
+            _phase_times["loss_viz"] = time.time() - _t
             if local_rank == 0:
-                print(f"[iter {i}]   loss landscape done ({time.time()-_t:.1f}s) → {loss_viz_dir}", flush=True)
+                print(f"[iter {i}]   loss landscape done ({_phase_times['loss_viz']:.1f}s) → {loss_viz_dir}", flush=True)
 
         # lm-eval runs on ALL ranks so the work is distributed across GPUs.
         # Only rank 0 saves results and logs to wandb.
         if do_checkpoint and eval_config is not None and tokenizer is not None:
-            _eval_net = net if isinstance(net, FSDP) else (net.module if isinstance(net, DDP) else net)
+            _t = time.time()
+            _eval_net = _eval_module(net)
             if local_rank == 0:
                 _num_runs = int(eval_config.get("num_runs", 1))
                 print(f"[iter {i}] Starting lm-eval on all ranks ({_num_runs} run(s)): {eval_config['tasks']}", flush=True)
             _eval_net.eval()
             eval_results = run_lm_eval(_eval_net, tokenizer, eval_config, device)
             net.train()
+            _phase_times["lm_eval"] = time.time() - _t
             if local_rank == 0:
                 _ckpt_dir = os.path.join(run_dir, f"checkpoint-{i}")
                 _num_runs = int(eval_config.get("num_runs", 1))
@@ -698,6 +877,22 @@ def pretrain(
                                 wandb_metrics[f"eval/{task}/{metric}/run_{run_idx}"] = v
                 wandb.log(wandb_metrics, step=i)
                 print(f"[iter {i}] lm-eval saved → {_ckpt_dir}/eval_results.json")
+
+        # Emit per-phase wall-clocks to wandb in a single log call. These are
+        # rank-0-only because most timing is captured rank-0-only above; the
+        # phases that run on all ranks (lm_eval, hyperviz, spectral_viz) take
+        # a global time so any rank's value is representative.
+        if do_checkpoint and local_rank == 0 and _phase_times:
+            # validation_eval_loop + validation_generation are sub-buckets of
+            # validation_total — exclude them from the total to avoid double
+            # counting.
+            _subkeys = {"validation_eval_loop", "validation_generation"}
+            _total = sum(v for k, v in _phase_times.items() if k not in _subkeys)
+            wandb.log(
+                {f"timing/checkpoint/{k}": v for k, v in _phase_times.items()}
+                | {"timing/checkpoint/total": _total},
+                step=i,
+            )
 
         # Wait for rank 0 to finish lm-eval logging before the next backward.
         if do_checkpoint and dist.is_initialized():
@@ -777,6 +972,32 @@ def main():
                         help="Compute and save singular-value distributions for all 2-D weight "
                              "matrices at every checkpoint. Saves plots to "
                              "{checkpoint}/viz/spectral_values/.")
+    parser.add_argument("--enable-viz", action="store_true",
+                        help="Master switch for always-on visualization instrumentation: "
+                             "(1) per-submodule activation-memory forward hooks and "
+                             "(2) wandb.watch gradient logging. Both add measurable overhead "
+                             "and are off by default. Per-checkpoint viz flags "
+                             "(--num-visualize-generations, --loss-viz, --spectral-viz) are "
+                             "independent of this and remain opt-in via their own flags.")
+    parser.add_argument("--log-freq", type=int, default=50,
+                        help="How often (in steps) to write per-iteration metrics to wandb "
+                             "and walk CUDA memory stats. Smaller = more wandb rows + more "
+                             "Python overhead per iter. Default: 50.")
+
+    compile_group = parser.add_argument_group("compile")
+    compile_group.add_argument("--compile", dest="compile", action="store_true", default=True,
+                               help="torch.compile() the model before DDP/FSDP wrap. "
+                                    "On by default — significant speedup at >100M params on H100. "
+                                    "Use --no-compile to disable.")
+    compile_group.add_argument("--no-compile", dest="compile", action="store_false",
+                               help="Disable torch.compile.")
+    compile_group.add_argument("--compile-mode", type=str, default="default",
+                               choices=["default", "reduce-overhead",
+                                        "max-autotune", "max-autotune-no-cudagraphs"],
+                               help="torch.compile mode. 'default' is safest with DDP. "
+                                    "'max-autotune-no-cudagraphs' can be faster but recompiles slower. "
+                                    "Avoid 'reduce-overhead'/'max-autotune' with DDP — cudagraphs "
+                                    "and DDP gradient buckets fight.")
 
     parallel_group = parser.add_argument_group("parallelism")
     parallel_group.add_argument("--num-dp-ranks", type=int, default=0,
@@ -846,6 +1067,50 @@ def main():
     if local_rank == 0:
         summary(net, input_data=x)
 
+    # Trace forward FLOPs once on the bare module before DDP/FSDP wrapping.
+    # We use the actual (micro_batch, sequence_length) shape so the figure
+    # matches a real microstep. fvcore is robust to fp32 weights + bf16 autocast
+    # (it counts ops, not bytes).
+    forward_flops_per_microbatch = 0
+    if local_rank == 0:
+        fwd_example = torch.zeros(
+            (conf["micro_batch_size"], conf["sequence_length"]),
+            dtype=torch.long, device=device,
+        )
+        forward_flops_per_microbatch = compute_forward_flops(net, fwd_example)
+        del fwd_example
+        torch.cuda.empty_cache()
+    if use_distributed:
+        flops_t = torch.tensor([forward_flops_per_microbatch], dtype=torch.long, device=device)
+        torch.distributed.broadcast(flops_t, src=0)
+        forward_flops_per_microbatch = int(flops_t.item())
+    peak_bf16_tflops_per_gpu = device_peak_bf16_tflops(device)
+    if local_rank == 0:
+        if forward_flops_per_microbatch > 0:
+            print(
+                f"Forward FLOPs / microbatch (B={conf['micro_batch_size']}, "
+                f"T={conf['sequence_length']}): {forward_flops_per_microbatch:,}"
+            )
+        else:
+            print("fvcore unavailable or trace failed — compute/forward_mfu will log 0.")
+        if peak_bf16_tflops_per_gpu > 0:
+            print(f"Device bf16 peak: {peak_bf16_tflops_per_gpu:.1f} TFLOPs/s "
+                  f"({torch.cuda.get_device_name(device)})")
+        else:
+            print(f"Unknown GPU peak for {torch.cuda.get_device_name(device)} — "
+                  "compute/forward_mfu will log 0.")
+
+    # Compile BEFORE DDP/FSDP wrap. The DDP forward then dispatches into the
+    # compiled graph for the per-rank microbatch, while DDP's bucketed
+    # gradient all-reduces stay in eager (which is what we want — DDP and
+    # cudagraphs don't compose well). Stick to mode="default" with DDP;
+    # 'reduce-overhead' / 'max-autotune' use cudagraphs and can deadlock.
+    if args.compile:
+        if local_rank == 0:
+            print(f"torch.compile(mode={args.compile_mode!r}) — first forward will be slow "
+                  "(graph capture + autotune); subsequent steps should be much faster.")
+        net = torch.compile(net, mode=args.compile_mode)
+
     if use_distributed:
         if parallel_mode == "fsdp":
             net = FSDP(net, device_id=local_rank)
@@ -879,8 +1144,14 @@ def main():
             train_seq["start"], train_seq["end"], train_seq["steps"],
             name="train_scheduler", shuffle=False,
         )
-    train_dataloader = DataLoader(train_dataset, batch_size=micro_batch_size,
-                                  num_workers=conf["num_workers"], sampler=train_sampler)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=micro_batch_size,
+        num_workers=conf["num_workers"],
+        sampler=train_sampler,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=conf["num_workers"] > 0,
+    )
 
     val_dataset = load_dataset(conf["validation_data_config"], conf["validation_sequence_length"],
                                debug=args.verbose, val=True, tokenizer=tokenizer)
@@ -955,9 +1226,17 @@ def main():
                 "start_iter": start_iter,
                 "num_dp_ranks": args.num_dp_ranks,
                 "parallel_mode": parallel_mode,
+                "enable_viz": args.enable_viz,
+                "log_freq": args.log_freq,
+                "compile": args.compile,
+                "compile_mode": args.compile_mode if args.compile else None,
             },
         )
-        wandb.watch(net, log="all", log_freq=100)
+        # wandb.watch is expensive on multi-billion-param models (it logs grad
+        # and/or param histograms for every tensor). Only enable when viz is on,
+        # and even then: gradients only, every 1000 steps.
+        if args.enable_viz:
+            wandb.watch(net, log="gradients", log_freq=1000)
 
     pretrain(
         net=net,
@@ -987,6 +1266,10 @@ def main():
         resumed=args.load is not None and start_iter > 0,
         parallel_mode=parallel_mode,
         grad_accum_steps=grad_accum_steps,
+        enable_viz=args.enable_viz,
+        log_freq=args.log_freq,
+        forward_flops_per_microbatch=forward_flops_per_microbatch,
+        peak_bf16_tflops_per_gpu=peak_bf16_tflops_per_gpu,
     )
 
     if use_distributed:

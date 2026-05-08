@@ -37,22 +37,26 @@ def _yarn_inv_freq(
     return gamma * inv_freq + (1.0 - gamma) * inv_freq / scale
 
 
-def _apply_rope(x: torch.Tensor, inv_freq: torch.Tensor) -> torch.Tensor:
-    """
-    Apply rotary embeddings to x.
-    x:        (..., T, d_head)
-    inv_freq: (d_head // 2,)
-    """
-    T = x.shape[-2]
-    t = torch.arange(T, device=x.device, dtype=inv_freq.dtype)
+def _build_rope_cache(inv_freq: torch.Tensor, max_seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute (cos, sin) of shape (max_seq_len, d_head) once at init."""
+    t = torch.arange(max_seq_len, device=inv_freq.device, dtype=inv_freq.dtype)
     freqs = torch.outer(t, inv_freq)                    # (T, d_head//2)
     emb = torch.cat([freqs, freqs], dim=-1)             # (T, d_head)
-    cos, sin = emb.cos(), emb.sin()
+    return emb.cos(), emb.sin()
 
-    # rotate_half: split first/second half
+
+def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """
+    Apply rotary embeddings to x using cached cos/sin.
+    x:   (..., T, d_head)
+    cos: (T_max, d_head)  — sliced to T inside
+    """
+    T = x.shape[-2]
+    cos_t = cos[:T]
+    sin_t = sin[:T]
     half = x.shape[-1] // 2
     x_rot = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
-    return x * cos + x_rot * sin
+    return x * cos_t + x_rot * sin_t
 
 
 class Attention(nn.Module):
@@ -65,6 +69,7 @@ class Attention(nn.Module):
         rope_base: int = 10000,
         yarn_scale: float = 1.0,
         yarn_original_max_len: int = 4096,
+        max_sequence_length: int = 32768,
     ):
         super().__init__()
         assert n_query_heads % n_kv_heads == 0
@@ -81,7 +86,9 @@ class Attention(nn.Module):
         self.out = nn.Linear(d_head * n_query_heads, d_model, bias=False)
 
         inv_freq = _yarn_inv_freq(d_head, rope_base, yarn_scale, yarn_original_max_len)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        cos, sin = _build_rope_cache(inv_freq, max_sequence_length)
+        self.register_buffer("rope_cos", cos, persistent=False)
+        self.register_buffer("rope_sin", sin, persistent=False)
 
         # YaRN attention scale: 1 / (mscale * sqrt(d_head))
         mscale = 0.1 * math.log(yarn_scale) + 1.0 if yarn_scale > 1.0 else 1.0
@@ -93,23 +100,18 @@ class Attention(nn.Module):
         q = self.q_proj(x)
         k, v = self.kv_proj(x).chunk(2, dim=-1)
 
-        q = rearrange(q, "b t (qpg g d) -> b qpg g t d", qpg=self.queries_per_group, g=self.n_kv_heads, d=self.d_head)
-        k = rearrange(k, "b t (g d) -> b 1 g t d", g=self.n_kv_heads, d=self.d_head)
-        v = rearrange(v, "b t (g d) -> b 1 g t d", g=self.n_kv_heads, d=self.d_head)
+        # SDPA with enable_gqa expects (B, H, T, D); kv heads stay at n_kv_heads
+        q = rearrange(q, "b t (h d) -> b h t d", h=self.n_query_heads, d=self.d_head)
+        k = rearrange(k, "b t (g d) -> b g t d", g=self.n_kv_heads, d=self.d_head)
+        v = rearrange(v, "b t (g d) -> b g t d", g=self.n_kv_heads, d=self.d_head)
 
-        # QK-norm and RoPE in fp32 for numerical precision, then cast back
-        orig_dtype = q.dtype
-        q = _apply_rope(self.q_norm(q.float()), self.inv_freq).to(orig_dtype)
-        k = _apply_rope(self.k_norm(k.float()), self.inv_freq).to(orig_dtype)
+        # RMSNorm reduces in fp32 internally; RoPE math stays in input dtype.
+        q = _apply_rope(self.q_norm(q), self.rope_cos, self.rope_sin)
+        k = _apply_rope(self.k_norm(k), self.rope_cos, self.rope_sin)
 
-        # Expand k/v over qpg then reshape to [B, n_query_heads, T, d_head] for SDPA
-        k = k.expand(B, self.queries_per_group, self.n_kv_heads, T, self.d_head)
-        v = v.expand(B, self.queries_per_group, self.n_kv_heads, T, self.d_head)
-        q = q.reshape(B, self.n_query_heads, T, self.d_head)
-        k = k.reshape(B, self.n_query_heads, T, self.d_head)
-        v = v.reshape(B, self.n_query_heads, T, self.d_head)
-
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.attn_scale)
+        out = F.scaled_dot_product_attention(
+            q, k, v, is_causal=True, scale=self.attn_scale, enable_gqa=True,
+        )
         out = rearrange(out, "b h t d -> b t (h d)")
         return self.out(out)
 
@@ -138,6 +140,7 @@ class Block(nn.Module):
         rope_base: int = 10000,
         yarn_scale: float = 1.0,
         yarn_original_max_len: int = 4096,
+        max_sequence_length: int = 32768,
     ):
         super().__init__()
         d_head = d_model // n_query_heads
@@ -147,7 +150,7 @@ class Block(nn.Module):
 
         self.attention = Attention(
             d_model, d_head, n_query_heads, n_kv_heads,
-            rope_base, yarn_scale, yarn_original_max_len,
+            rope_base, yarn_scale, yarn_original_max_len, max_sequence_length,
         )
         self.feed_forward_network = MLP(d_model, mlp_expansion_factor)
 
@@ -172,6 +175,7 @@ class Qwen3(PreTrainedModel):
                 config.rope_base,
                 config.yarn_scale,
                 config.yarn_original_max_len,
+                config.max_sequence_length,
             )
             for _ in range(config.n_blocks)
         ])
@@ -198,13 +202,15 @@ class Qwen3(PreTrainedModel):
         self,
         input_ids: torch.Tensor,
         labels: torch.Tensor | None = None,
+        collect_hidden_states: bool = False,
         **kwargs,
     ) -> LMOutput:
         h = self.embedding(input_ids)
-        hidden_states = []
+        hidden_states = [] if collect_hidden_states else None
         for block in self.blocks:
             h = block(h)
-            hidden_states.append(h.detach().float().cpu())
+            if hidden_states is not None:
+                hidden_states.append(h.detach().float().cpu())
         logits = F.linear(self.final_norm(h), self.lm_head)
 
         loss = None
@@ -213,9 +219,7 @@ class Qwen3(PreTrainedModel):
                 logits[:, :-1, :].contiguous().view(-1, self.config.vocab_size),
                 labels[:, 1:].contiguous().view(-1),
             )
-        
-        metadata = {
-            "hidden_states" : hidden_states
-        }
+
+        metadata = {"hidden_states": hidden_states}
 
         return LMOutput(loss=loss, logits=logits, metadata=metadata)

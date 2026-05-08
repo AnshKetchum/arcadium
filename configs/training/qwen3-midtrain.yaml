@@ -3,10 +3,10 @@ parameters:
   run_name: "qwen3-100M"
   training_steps: 50000
   epochs: 2
-  val_steps: 10
+  val_steps: 0 
   checkpoint_frequency: 1000  # keeping as requested
   micro_batch_size: 4         # per-GPU per-forward-pass
-  global_batch_size: 128       
+  global_batch_size:  64      
   num_workers: 4              # keeping as requested
   sequence_length: 4096      # increased from 32
   lr: 3e-4
