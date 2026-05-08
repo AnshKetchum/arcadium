@@ -314,6 +314,8 @@ def pretrain(
     run_dir=None,
     profile_start=-1,
     profile_end=-1,
+    capture_memory_snapshot=False,
+    memory_snapshot_events=100_000,
     start_iter=0,
     cumulative_tokens_start=0,
     source_tokens_start=None,
@@ -352,15 +354,24 @@ def pretrain(
 
     _profiler_active = False
     profiler = None
-    if profile_start >= 0 and profile_end > profile_start:
-        profile_dir = os.path.join(run_dir, "profile")
-        os.makedirs(profile_dir, exist_ok=True)
-        profiler = torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
-            record_shapes=True, profile_memory=True, with_stack=True,
-        )
-        print(f"Profiler armed: will capture iters [{profile_start}, {profile_end}] → {profile_dir}")
+    _memory_snapshot_active = False
+    _memory_snapshot_path = None
+    _profile_enabled = profile_start >= 0 and profile_end > profile_start
+    _num_profile_steps = (profile_end - profile_start + 1) if _profile_enabled else 0
+    _capture_memory_snapshot = (
+        _profile_enabled and capture_memory_snapshot and torch.cuda.is_available()
+    )
+    cuda_profile_dir = memory_profile_dir = None
+    if _profile_enabled:
+        cuda_profile_dir = os.path.join(run_dir, "profiles", "cuda")
+        os.makedirs(cuda_profile_dir, exist_ok=True)
+        if _capture_memory_snapshot:
+            memory_profile_dir = os.path.join(run_dir, "profiles", "memory")
+            os.makedirs(memory_profile_dir, exist_ok=True)
+        _mem_msg = (f" + memory snapshot (max_entries={memory_snapshot_events}) → {memory_profile_dir}"
+                    if _capture_memory_snapshot else "")
+        print(f"Profiler armed: will capture iters [{profile_start}, {profile_end}] "
+              f"({_num_profile_steps} steps) → {cuda_profile_dir}{_mem_msg}")
 
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     activation_stats: dict = defaultdict(list)
@@ -608,17 +619,39 @@ def pretrain(
                 wandb_log[f"data/{name}/cumulative_tokens"] = _per_source_tokens.get(name, 0) * world_size
             wandb.log(wandb_log, step=i)
 
-        if profiler is not None and i == profile_start:
+        if _profile_enabled and i == profile_start:
+            _trace_name = (
+                f"epoch{current_epoch}_step{i}_numsteps{_num_profile_steps}_rank{local_rank}"
+            )
+            profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    cuda_profile_dir, worker_name=_trace_name
+                ),
+                record_shapes=True, profile_memory=True, with_stack=True,
+            )
             profiler.start()
             _profiler_active = True
-            print(f"[iter {i}] Profiler started")
+            print(f"[iter {i}] Profiler started "
+                  f"(epoch={current_epoch}, step={i}, num_steps={_num_profile_steps})")
+            if _capture_memory_snapshot:
+                torch.cuda.memory._record_memory_history(max_entries=memory_snapshot_events)
+                _memory_snapshot_active = True
+                _memory_snapshot_path = os.path.join(memory_profile_dir, f"{_trace_name}.pickle")
+                print(f"[iter {i}] CUDA memory recording started "
+                      f"(max_entries={memory_snapshot_events})")
         if _profiler_active:
             profiler.step()
         if _profiler_active and i == profile_end:
             profiler.stop()
             _profiler_active = False
             profiler = None
-            print(f"[iter {i}] Profiler stopped → {profile_dir}")
+            print(f"[iter {i}] Profiler stopped → {cuda_profile_dir}")
+            if _memory_snapshot_active:
+                torch.cuda.memory._dump_snapshot(_memory_snapshot_path)
+                torch.cuda.memory._record_memory_history(enabled=None)
+                _memory_snapshot_active = False
+                print(f"[iter {i}] CUDA memory snapshot dumped → {_memory_snapshot_path}")
 
         do_checkpoint = (i % checkpoint_frequency == 0 or i == num_iters - 1)
         skip_viz = resumed and i == start_iter
@@ -939,6 +972,13 @@ def main():
                         help="Treat --profile-start/--profile-end as offsets from the resume iteration "
                              "(e.g. --profile-start 10 --profile-end 50 --profile-relative profiles "
                              "iters resume+10 through resume+50)")
+    parser.add_argument("--capture-memory-snapshot", action="store_true",
+                        help="Also dump a torch.cuda memory snapshot pickle for the same iteration "
+                             "window as --profile-start/--profile-end. Saved to "
+                             "{run_dir}/profiles/memory/.")
+    parser.add_argument("--memory-snapshot-events", type=int, default=100_000,
+                        help="Maximum number of allocator events captured per CUDA memory snapshot. "
+                             "Default: 100000.")
     parser.add_argument("--load", type=str, default=None,
                         help="Path to an existing run directory to resume training from. "
                              "The latest checkpoint-{N} inside it will be loaded automatically.")
@@ -1255,6 +1295,8 @@ def main():
         run_dir=run_dir,
         profile_start=profile_start,
         profile_end=profile_end,
+        capture_memory_snapshot=args.capture_memory_snapshot,
+        memory_snapshot_events=args.memory_snapshot_events,
         start_iter=start_iter,
         cumulative_tokens_start=cumulative_tokens_start,
         source_tokens_start=source_tokens_start,
